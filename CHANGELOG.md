@@ -5,6 +5,8 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+## 0.5.0 - 2026-10-16
+
 - **Drag and drop audio onto the timeline**: WAV, BWF and AIFF files (or a whole folder) become new tracks in the take on screen, starting where you drop them (near the left edge snaps to 0:00). Stereo files make stereo tracks; multichannel files are split into one track per channel. Files are converted to the session's format and sample rate; the originals are never touched.
 - **LiveDeck folder in Documents**: Documents > LiveDeck > Shows (new sessions go here by default) and Templates (File > New from Template lists them). Choose Folder... still records anywhere else, such as an external SSD.
 - **Feedback and feature requests**: Help > Request a Feature, Report a Bug or Send Feedback opens a filled-in GitHub issue in your browser.
