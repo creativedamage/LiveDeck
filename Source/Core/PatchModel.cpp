@@ -13,19 +13,43 @@ static bool validTrack (const PatchState& s, int t) { return t >= 0 && t < (int)
 
 void applyMirror (PatchState& s)
 {
-    const int n = juce::jmin (s.numInputs, kMaxTracks);
-    s.tracks.resize ((size_t) n);
-    for (int i = 0; i < n; ++i)
+    for (auto& t : s.tracks)
     {
-        auto& t = s.tracks[(size_t) i];
-        t.input = i;
-        t.stereo = false;
-        t.outStereo = false;
         t.outputs.clear();
-        if (i < s.numOutputs) t.outputs.push_back (i);
-        if (t.autoName || t.name.isEmpty()) { t.name = defaultInputName (s, i); t.autoName = true; }
+        t.outStereo = false;
+        if (t.input < 0) continue;
+        t.outputs.push_back (t.input);   // same channel number, same width
+        t.outStereo = t.stereo;
     }
-    ensureTrackIds (s);
+}
+
+static bool locate (const std::vector<DeviceLayout>& devs, bool inputs, int global, int total, int& device, int& local)
+{
+    if (global < 0 || global >= total) return false;
+    if (devs.empty()) { device = 0; local = global; return true; }
+    int start = 0;
+    for (int d = 0; d < (int) devs.size() && d < kMaxDevices; ++d)
+    {
+        const int n = inputs ? devs[(size_t) d].numInputs : devs[(size_t) d].numOutputs;
+        if (global < start + n) { device = d; local = global - start; return true; }
+        start += n;
+    }
+    return false;
+}
+
+bool locateInput (const PatchState& s, int global, int& device, int& local)  { return locate (s.devices, true, global, s.numInputs, device, local); }
+bool locateOutput (const PatchState& s, int global, int& device, int& local) { return locate (s.devices, false, global, s.numOutputs, device, local); }
+
+bool isInputActive (const PatchState& s, int ch)
+{
+    if (ch < 0 || ch >= s.numInputs) return false;
+    return s.inputActive.empty() || (ch < (int) s.inputActive.size() && s.inputActive[(size_t) ch]);
+}
+
+bool isOutputActive (const PatchState& s, int ch)
+{
+    if (ch < 0 || ch >= s.numOutputs) return false;
+    return s.outputActive.empty() || (ch < (int) s.outputActive.size() && s.outputActive[(size_t) ch]);
 }
 
 void ensureTrackIds (PatchState& s)
@@ -54,7 +78,6 @@ juce::Result deleteTracks (PatchState& s, std::vector<int> rows, bool recording)
     rows.erase (std::unique (rows.begin(), rows.end()), rows.end());
     for (auto it = rows.rbegin(); it != rows.rend(); ++it)
         if (*it >= 0 && *it < (int) s.tracks.size()) s.tracks.erase (s.tracks.begin() + *it);
-    if (! rows.empty()) s.mirror = false;
     return juce::Result::ok();
 }
 
@@ -77,7 +100,7 @@ juce::Result moveTracks (PatchState& s, std::vector<int> rows, int insertBefore,
     rest.insert (rest.begin() + insertAt, moving.begin(), moving.end());
     const bool changed = [&] { for (size_t i = 0; i < rest.size(); ++i) if (rest[i].id != s.tracks[i].id) return true; return false; }();
     s.tracks = std::move (rest);
-    if (changed) s.mirror = false;
+    juce::ignoreUnused (changed);
     if (newRows != nullptr)
     {
         newRows->clear();
@@ -86,35 +109,31 @@ juce::Result moveTracks (PatchState& s, std::vector<int> rows, int insertBefore,
     return juce::Result::ok();
 }
 
-juce::Result setDeviceChannels (PatchState& s, const juce::StringArray& ins, const juce::StringArray& outs)
+juce::Result setDeviceChannels (PatchState& s, const juce::StringArray& ins, const juce::StringArray& outs,
+                                const std::vector<bool>& inActive, const std::vector<bool>& outActive)
 {
     s.inputNames = ins;
     s.outputNames = outs;
     s.numInputs = ins.size();
     s.numOutputs = outs.size();
+    s.inputActive = inActive;
+    s.outputActive = outActive;
 
-    if (s.mirror) { applyMirror (s); return juce::Result::ok(); }
-
-    // Manual routing: keep the patch, but flag channels the new device does not have.
-    int lost = 0;
+    int missing = 0;
     for (auto& t : s.tracks)
     {
-        if (t.input >= s.numInputs) { t.input = -1; ++lost; }
-        if (t.stereo && t.input + 1 >= s.numInputs) t.stereo = false;
-        if (t.outStereo && (t.outputs.empty() || t.outputs.front() + 1 >= s.numOutputs)) t.outStereo = false;
-        t.outputs.erase (std::remove_if (t.outputs.begin(), t.outputs.end(), [&] (int o) { return o >= s.numOutputs; }), t.outputs.end());
-        if (t.autoName && t.input >= 0) t.name = defaultInputName (s, t.input);
+        if (t.input >= 0 && (! isInputActive (s, t.input) || (t.stereo && ! isInputActive (s, t.input + 1)))) ++missing;
+        if (t.autoName && t.input >= 0 && t.input < s.numInputs) t.name = defaultInputName (s, t.input);
     }
-    if (s.monitorLeft >= s.numOutputs) s.monitorLeft = -1;
-    if (s.monitorRight >= s.numOutputs) s.monitorRight = -1;
-    return lost == 0 ? juce::Result::ok()
-                     : juce::Result::fail (juce::String (lost) + " track(s) lost their input: the new device has only "
-                                           + juce::String (s.numInputs) + " inputs");
+    if (s.mirror) applyMirror (s);
+    return missing == 0 ? juce::Result::ok()
+                        : juce::Result::fail (juce::String (missing) + " track(s) are patched to inputs that are not available right now; "
+                                              "their patch is kept and they record silence until the input returns");
 }
 
 juce::Result setMirror (PatchState& s, bool on, bool recording)
 {
-    if (recording) return juce::Result::fail ("Mirror 1:1 is locked while recording");
+    juce::ignoreUnused (recording);   // outputs only: safe to change while recording
     s.mirror = on;
     if (on) applyMirror (s);
     return juce::Result::ok();
@@ -127,12 +146,10 @@ juce::Result setTrackInput (PatchState& s, int track, int input, bool recording,
     if (recording && t.armed) return juce::Result::fail ("Input is locked on armed tracks while recording");
     if (input >= s.numInputs) return juce::Result::fail ("No such input");
     if (stereo && input + 1 >= s.numInputs) return juce::Result::fail ("No stereo pair at input " + juce::String (input + 1));
-    const bool wasMirror = s.mirror;
-    s.mirror = false; // manual edit leaves mirror mode but keeps the mapping
     t.input = input;
     t.stereo = stereo && input >= 0;
     if (t.autoName && input >= 0) t.name = defaultInputName (s, input);
-    juce::ignoreUnused (wasMirror); // caller compares s.mirror before/after to show the "mirror off" notice
+    if (s.mirror) applyMirror (s);   // in mirror mode the output follows the new input
     return juce::Result::ok();
 }
 
@@ -152,16 +169,58 @@ juce::Result setTrackOutput (PatchState& s, int track, int output, bool stereo)
     return juce::Result::ok();
 }
 
+int firstUnusedInput (const PatchState& s, bool stereo)
+{
+    std::vector<bool> used ((size_t) juce::jmax (0, s.numInputs), false);
+    for (const auto& t : s.tracks)
+        for (int k = 0; k < (t.stereo ? 2 : 1); ++k)
+            if (t.input + k >= 0 && t.input + k < s.numInputs) used[(size_t) (t.input + k)] = true;
+    for (int ch = 0; ch < s.numInputs; ch += (stereo ? 2 : 1))
+    {
+        if (stereo && ch + 1 >= s.numInputs) break;
+        const bool free = ! used[(size_t) ch] && isInputActive (s, ch)
+                          && (! stereo || (! used[(size_t) ch + 1] && isInputActive (s, ch + 1)));
+        if (free) return ch;
+    }
+    return -1;
+}
+
+static TrackState makeTrack (const PatchState& s, int input, bool stereo)
+{
+    TrackState t;
+    t.input = input;
+    t.stereo = stereo && input >= 0;
+    if (input >= 0) { t.name = defaultInputName (s, input); t.autoName = true; }
+    else { t.name = "Track " + juce::String ((int) s.tracks.size() + 1); t.autoName = false; }
+    return t;
+}
+
 juce::Result addTrack (PatchState& s, bool recording)
 {
     if (recording) return juce::Result::fail ("Tracks cannot be added while recording");
     if ((int) s.tracks.size() >= kMaxTracks) return juce::Result::fail ("Track limit reached");
-    s.mirror = false;
-    TrackState t;
-    t.name = "Track " + juce::String ((int) s.tracks.size() + 1);
-    t.autoName = false;
-    s.tracks.push_back (t);
+    s.tracks.push_back (makeTrack (s, firstUnusedInput (s, false), false));
     ensureTrackIds (s);
+    if (s.mirror) applyMirror (s);
+    return juce::Result::ok();
+}
+
+juce::Result addTracks (PatchState& s, int count, int firstInput, bool stereo, bool recording)
+{
+    if (recording) return juce::Result::fail ("Tracks cannot be added while recording");
+    if (count < 1) return juce::Result::fail ("Nothing to add");
+    if ((int) s.tracks.size() + count > kMaxTracks) return juce::Result::fail ("That would exceed " + juce::String (kMaxTracks) + " tracks");
+    int ch = juce::jmax (0, firstInput);
+    for (int n = 0; n < count; ++n)
+    {
+        // next active channel (pair) from ch; tracks past the device's channels are added unpatched
+        while (ch < s.numInputs && ! (isInputActive (s, ch) && (! stereo || isInputActive (s, ch + 1)))) ++ch;
+        const bool ok = ch < s.numInputs && (! stereo || ch + 1 < s.numInputs);
+        s.tracks.push_back (makeTrack (s, ok ? ch : -1, stereo));
+        ch += stereo ? 2 : 1;
+    }
+    ensureTrackIds (s);
+    if (s.mirror) applyMirror (s);
     return juce::Result::ok();
 }
 
@@ -169,7 +228,6 @@ juce::Result removeLastTrack (PatchState& s, bool recording)
 {
     if (recording) return juce::Result::fail ("Tracks cannot be removed while recording");
     if (s.tracks.empty()) return juce::Result::ok();
-    s.mirror = false;
     s.tracks.pop_back();
     return juce::Result::ok();
 }
@@ -197,24 +255,52 @@ std::unique_ptr<RoutingSnapshot> compileSnapshot (const PatchState& s, uint32_t 
     auto snap = std::make_unique<RoutingSnapshot>();
     snap->generation = generation;
     snap->numTracks = juce::jmin ((int) s.tracks.size(), kMaxTracks);
-    snap->monitorLeft = s.monitorLeft;
-    snap->monitorRight = s.monitorRight;
     snap->monitorGain = juce::Decibels::decibelsToGain (s.monitorDb);
+
+    int d = 0, l = 0;
+    if (locateOutput (s, s.monitorLeft, d, l)) { snap->monitorDev = d; snap->monitorLeft = l; }
+    if (locateOutput (s, s.monitorRight, d, l))
+    {
+        if (snap->monitorLeft < 0) { snap->monitorDev = d; snap->monitorRight = l; }
+        else if (d == snap->monitorDev) snap->monitorRight = l;
+    }
 
     for (int i = 0; i < snap->numTracks; ++i)
     {
         const auto& t = s.tracks[(size_t) i];
         auto& r = snap->tracks[(size_t) i];
-        r.input = (int16_t) t.input;
-        r.input2 = (int16_t) (t.stereo && t.input >= 0 ? t.input + 1 : -1);
-        r.outStereo = t.outStereo ? 1 : 0;
         r.armed = t.armed ? 1 : 0;
         r.mute = t.mute ? 1 : 0;
         r.solo = t.solo ? 1 : 0;
         r.gain = juce::Decibels::decibelsToGain (t.trimDb);
-        r.numOuts = (uint8_t) juce::jmin ((int) t.outputs.size(), kMaxDirectOuts);
-        for (int k = 0; k < r.numOuts; ++k) r.outs[(size_t) k] = (int16_t) t.outputs[(size_t) k];
         snap->anySolo |= t.solo;
+
+        r.input = r.input2 = -1;
+        if (locateInput (s, t.input, d, l))
+        {
+            r.inDev = (uint8_t) d;
+            r.input = (int16_t) l;
+            int d2 = 0, l2 = 0;
+            if (t.stereo && locateInput (s, t.input + 1, d2, l2) && d2 == d) r.input2 = (int16_t) l2;  // pairs never span devices
+        }
+
+        r.numOuts = 0;
+        r.outDev = r.inDev;
+        bool first = true;
+        for (int o : t.outputs)
+        {
+            if (r.numOuts >= kMaxDirectOuts || ! locateOutput (s, o, d, l)) continue;
+            if (first) { r.outDev = (uint8_t) d; first = false; }
+            else if (d != r.outDev) continue;
+            r.outs[(size_t) r.numOuts++] = (int16_t) l;
+        }
+        if (r.numOuts > 0 && r.outDev != r.inDev) ++snap->crossDeviceOuts;
+        r.outStereo = 0;
+        if (t.outStereo && r.numOuts > 0)
+        {
+            int d2 = 0, l2 = 0;
+            r.outStereo = (locateOutput (s, t.outputs.front() + 1, d2, l2) && d2 == r.outDev) ? 1 : 0;
+        }
     }
     return snap;
 }

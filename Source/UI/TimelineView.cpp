@@ -378,21 +378,46 @@ void TimelineView::paintRow (juce::Graphics& g, int i, juce::Rectangle<int> r)
     const int px0 = (int) x0, w = (int) x1 - px0;
     if (w <= 0) return;
     scratch.resize ((size_t) w);
-    row.peaks->render (xToFrame ((float) px0), fpp, w, scratch.data());
+    const auto waveColour = row.colour.interpolatedWith (juce::Colours::white, 0.6f).withAlpha (row.mute ? 0.35f : 0.92f);
 
-    const float mid = clip.getCentreY() + 1.0f;
-    const float half = clip.getHeight() * 0.5f - 3.0f;
-    juce::RectangleList<float> bars;
-    bars.ensureStorageAllocated (w);
-    for (int k = 0; k < w; ++k)
+    // Stereo files draw two lanes (L on top, R below); mono draws one.
+    const int nch = row.peaks->numChannels();
+    for (int c = 0; c < nch; ++c)
     {
-        const float v = scratch[(size_t) k];
-        if (v <= 0.0f) continue;
-        const float hh = juce::jmax (0.5f, v * half);
-        bars.addWithoutMerging ({ (float) (px0 + k), mid - hh, 1.0f, hh * 2.0f });
+        auto chLane = nch == 1 ? clip : (c == 0 ? clip.withHeight (clip.getHeight() * 0.5f)
+                                                : clip.withTrimmedTop (clip.getHeight() * 0.5f));
+        row.peaks->render (xToFrame ((float) px0), fpp, w, scratch.data(), nch == 1 ? -1 : c);
+
+        const float mid = chLane.getCentreY() + (nch == 1 ? 1.0f : 0.0f);
+        const float half = chLane.getHeight() * 0.5f - (nch == 1 ? 3.0f : 1.5f);
+        juce::RectangleList<float> bars;
+        bars.ensureStorageAllocated (w);
+        for (int k = 0; k < w; ++k)
+        {
+            const float v = scratch[(size_t) k];
+            if (v <= 0.0f) continue;
+            const float hh = juce::jmax (0.5f, v * half);
+            bars.addWithoutMerging ({ (float) (px0 + k), mid - hh, 1.0f, hh * 2.0f });
+        }
+        g.setColour (waveColour);
+        g.fillRectList (bars);
+
+        if (nch == 2)
+        {
+            if (c == 1)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.45f));
+                g.fillRect (chLane.getX(), chLane.getY() - 0.5f, chLane.getWidth(), 1.0f);
+            }
+            if (rowH >= 48)
+            {
+                g.setColour (row.colour.withAlpha (0.9f));
+                g.setFont (Theme::ui (9.5f, true));
+                g.drawText (c == 0 ? "L" : "R", juce::Rectangle<float> (juce::jmax (chLane.getX(), (float) kHeaderW) + 3.0f, chLane.getY() + 1.0f, 10.0f, 11.0f),
+                            juce::Justification::centredLeft);
+            }
+        }
     }
-    g.setColour (row.colour.interpolatedWith (juce::Colours::white, 0.6f).withAlpha (row.mute ? 0.35f : 0.92f));
-    g.fillRectList (bars);
 }
 
 void TimelineView::paint (juce::Graphics& g)
@@ -434,7 +459,7 @@ void TimelineView::paint (juce::Graphics& g)
         {
             g.setColour (Theme::textDim);
             g.setFont (Theme::ui (13.0f));
-            g.drawText ("No tracks: choose an audio device in Audio Setup", ra, juce::Justification::centred);
+            g.drawText ("No tracks yet: click + Track, or Tracks > Add Multiple Tracks...", ra, juce::Justification::centred);
         }
 
         // drag-and-drop insertion line

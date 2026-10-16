@@ -13,6 +13,15 @@ namespace omr
 {
 constexpr int kMaxTracks = 256;
 constexpr int kMaxDirectOuts = 4;
+constexpr int kMaxDevices = 8;
+
+// One open audio device. Channels of all devices are numbered globally in device order
+// (device 0's inputs first), so tracks keep a single input/output number.
+struct DeviceLayout
+{
+    juce::String name;
+    int numInputs = 0, numOutputs = 0;
+};
 
 struct TrackState
 {
@@ -30,22 +39,36 @@ struct TrackState
 
 struct PatchState
 {
-    bool mirror = true;                  // "Mirror Input to Output (1:1)"
+    bool mirror = true;                  // "Mirror Input to Output": each track's output follows its input (in 7 -> out 7)
     int numInputs = 0, numOutputs = 0;   // of the open device
     juce::StringArray inputNames, outputNames;
+    std::vector<bool> inputActive, outputActive;   // runtime only: channels enabled in Audio Setup (empty = all)
+    std::vector<DeviceLayout> devices;               // runtime only: empty = one device holding every channel
     std::vector<TrackState> tracks;
     int monitorLeft = -1, monitorRight = -1; // monitor bus outputs, -1 = off
     float monitorDb = 0.0f;
 };
 
 // ---- operations (control / message thread). `recording` enables the record-time locks.
-juce::Result setDeviceChannels (PatchState&, const juce::StringArray& inputNames, const juce::StringArray& outputNames);
+// Records the device's channels. Never adds, removes or re-patches tracks: a track whose channel
+// is missing (device unplugged, fewer channels) keeps its patch and is reported, not changed.
+juce::Result setDeviceChannels (PatchState&, const juce::StringArray& inputNames, const juce::StringArray& outputNames,
+                                const std::vector<bool>& inputActive = {}, const std::vector<bool>& outputActive = {});
+bool isInputActive (const PatchState&, int channel);
+// Global channel -> (device, channel on that device). False if the channel does not exist.
+bool locateInput (const PatchState&, int global, int& device, int& local);
+bool locateOutput (const PatchState&, int global, int& device, int& local);
+bool isOutputActive (const PatchState&, int channel);
 juce::Result setMirror (PatchState&, bool on, bool recording);
 // `stereo` picks the pair (input, input + 1) and makes the track stereo.
 juce::Result setTrackInput (PatchState&, int track, int input, bool recording, bool stereo = false);
 // Replaces the primary direct out; -1 clears. `stereo` = the pair (output, output + 1).
 juce::Result setTrackOutput (PatchState&, int track, int output, bool stereo = false);
+// Adds a track on the first active input no other track uses (or unpatched if all are used).
 juce::Result addTrack (PatchState&, bool recording);
+// Adds `count` tracks on consecutive active inputs from `firstInput` (pairs when stereo).
+juce::Result addTracks (PatchState&, int count, int firstInput, bool stereo, bool recording);
+int firstUnusedInput (const PatchState&, bool stereo);
 juce::Result removeLastTrack (PatchState&, bool recording);
 // Deletes the given rows (any order). Recorded audio is never touched.
 juce::Result deleteTracks (PatchState&, std::vector<int> rows, bool recording);
@@ -56,7 +79,7 @@ void ensureTrackIds (PatchState&);   // gives every track a unique id > 0
 int rowForTrackId (const PatchState&, int id);
 juce::Result setArmed (PatchState&, int track, bool armed, bool recording);
 juce::Result renameTrack (PatchState&, int track, const juce::String& name);
-void applyMirror (PatchState&);
+void applyMirror (PatchState&);   // outputs follow inputs; tracks are never created or removed
 
 juce::var patchToVar (const PatchState&);
 PatchState patchFromVar (const juce::var&);
@@ -64,8 +87,9 @@ PatchState patchFromVar (const juce::var&);
 // ---- real-time snapshot
 struct TrackRT
 {
-    int16_t input = -1, input2 = -1;      // input2 >= 0 for stereo tracks
+    int16_t input = -1, input2 = -1;      // channels on device `inDev`; input2 >= 0 for stereo tracks
     uint8_t armed = 0, mute = 0, solo = 0, numOuts = 0, outStereo = 0;
+    uint8_t inDev = 0, outDev = 0;        // outs[] are channels on device `outDev`
     float gain = 1.0f;
     std::array<int16_t, kMaxDirectOuts> outs {};
 };
@@ -75,8 +99,10 @@ struct RoutingSnapshot
     uint32_t generation = 0;
     int numTracks = 0;
     bool anySolo = false;
-    int monitorLeft = -1, monitorRight = -1;
+    int monitorLeft = -1, monitorRight = -1;   // channels on device `monitorDev`
+    int monitorDev = 0;
     float monitorGain = 1.0f;
+    int crossDeviceOuts = 0;                  // direct outs dropped because they sit on another device than the input
     std::array<TrackRT, kMaxTracks> tracks {};
 };
 

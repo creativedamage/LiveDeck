@@ -13,7 +13,9 @@ public:
 
     explicit ChannelStrip (int trackIndex);
 
-    void setChannelLists (const juce::StringArray& inputs, const juce::StringArray& outputs);
+    // Only channels ticked in Audio Setup are offered (stereo pairs need both channels active).
+    void setChannelLists (const juce::StringArray& inputs, const juce::StringArray& outputs,
+                          const std::vector<bool>& inputActive = {}, const std::vector<bool>& outputActive = {});
     void showTrack (const omr::TrackState& t, bool mirror, bool recording);
     void pushMeter (float peak, float rms, bool clip);
 

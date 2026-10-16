@@ -42,7 +42,8 @@ set(OMR_CORE_SOURCES
     Source/Core/EventLog.cpp
     Source/Core/Player.cpp
     Source/Core/PeakStore.cpp
-    Source/Core/Updater.cpp)
+    Source/Core/Updater.cpp
+    Source/Core/Remote.cpp)
 
 # ---------------------------------------------------------------------------
 # GitHub repository used for in-app updates ("owner/repo"). Taken from
@@ -84,6 +85,7 @@ target_sources(LiveDeck PRIVATE
     Source/Audio/AudioEngine.cpp
     Source/UI/ChannelStrip.cpp
     Source/UI/TimelineView.cpp
+    Source/UI/RemoteControl.cpp
     Source/UI/TransportBar.cpp
     Source/UI/MainComponent.cpp
     Source/Main.cpp)
@@ -113,6 +115,7 @@ target_link_libraries(LiveDeck
         juce::juce_audio_devices
         juce::juce_audio_formats
         juce::juce_cryptography
+        juce::juce_osc
         juce::juce_gui_extra
     PUBLIC
         juce::juce_recommended_config_flags

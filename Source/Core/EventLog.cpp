@@ -25,7 +25,8 @@ void EventLog::post (Level l, const juce::String& text)
 
 void EventLog::drainRealtime (double sampleRate)
 {
-    while (auto* e = rt.front())
+    for (auto& q : rt)
+    while (auto* e = q->front())
     {
         const double secs = sampleRate > 0 ? (double) e->samplePos / sampleRate : 0.0;
         const auto at = juce::String (secs, 3) + " s";
@@ -46,7 +47,7 @@ void EventLog::drainRealtime (double sampleRate)
                 post (Level::error, "Too many disk overruns to track on track " + juce::String (e->track + 1) + "; alignment may be lost after " + at);
                 break;
         }
-        rt.pop();
+        q->pop();
     }
 }
 

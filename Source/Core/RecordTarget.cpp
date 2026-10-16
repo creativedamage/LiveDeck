@@ -98,7 +98,7 @@ void RecordTarget::start()
     startThread (juce::Thread::Priority::high);
 }
 
-void RecordTarget::push (int track, const float* left, const float* right, size_t n, uint64_t takeFramePos) noexcept
+void RecordTarget::push (int track, const float* left, const float* right, size_t n, uint64_t takeFramePos, int device) noexcept
 {
     auto* io = byTrack[(size_t) track].get();
     if (io == nullptr) return;
@@ -138,15 +138,15 @@ void RecordTarget::push (int track, const float* left, const float* right, size_
         else
         {
             if (og.remaining > 0 && ! io->gaps->push (og))
-                log.pushRealtime ({ RtEvent::gapQueueFull, (uint8_t) index, (uint16_t) track, takeFramePos, 0 });
+                log.pushRealtime ({ RtEvent::gapQueueFull, (uint8_t) index, (uint16_t) track, takeFramePos, 0 }, device);
             og = { pos, lost };
-            log.pushRealtime ({ RtEvent::overrun, (uint8_t) index, (uint16_t) track, takeFramePos + framesWritten, (uint32_t) lostFrames });
+            log.pushRealtime ({ RtEvent::overrun, (uint8_t) index, (uint16_t) track, takeFramePos + framesWritten, (uint32_t) lostFrames }, device);
         }
     }
     else if (og.remaining > 0)
     {
         if (! io->gaps->push (og))
-            log.pushRealtime ({ RtEvent::gapQueueFull, (uint8_t) index, (uint16_t) track, takeFramePos, 0 });
+            log.pushRealtime ({ RtEvent::gapQueueFull, (uint8_t) index, (uint16_t) track, takeFramePos, 0 }, device);
         og = {};
     }
 }

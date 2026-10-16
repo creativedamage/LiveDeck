@@ -15,6 +15,9 @@ struct TransportStatus
     double cpu = 0;
     double ppm = 0;
     bool clockKnown = false;
+    int devices = 1;            // running devices
+    double worstDrift = 0;      // ppm between the primary and the worst extra device
+    bool driftKnown = false;
     int dropouts = 0;
 
     struct Disk
@@ -38,7 +41,7 @@ public:
     juce::ComboBox takeCombo;
     juce::TextButton sessionMenu { "Session" }, disksMenu { "Disks" }, audioSetup { "Audio Setup" }, viewMenu { "View" };
     juce::TextButton addTrack { "+ Track" }, removeTrack { "- Track" };
-    juce::ToggleButton mirrorToggle { "Mirror Input to Output (1:1)" };
+    juce::ToggleButton mirrorToggle { "Mirror Input to Output" };
     juce::ComboBox monitorLeft, monitorRight;
 
     void paint (juce::Graphics&) override;

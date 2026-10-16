@@ -126,7 +126,7 @@ juce::Result Player::load (const std::map<int, juce::File>& filesByRow, int take
         tracks[(size_t) trackIndex] = std::move (t);
     }
 
-    pos = std::min (startFrame, lengthFrames);
+    for (auto& p : pos) p = std::min (startFrame, lengthFrames);
 
     // Pre-roll: fill every ring before the audio thread sees us.
     for (auto* t : list)
@@ -183,7 +183,7 @@ void Player::run()
     }
 }
 
-int Player::readTrack (int track, float* dstL, float* dstR, int n, uint64_t posForEvents) noexcept
+int Player::readTrack (int track, float* dstL, float* dstR, int n, uint64_t posForEvents, int device) noexcept
 {
     auto* t = tracks[(size_t) track].get();
     const size_t ch = (size_t) t->channels;
@@ -196,7 +196,7 @@ int Player::readTrack (int track, float* dstL, float* dstR, int n, uint64_t posF
         t->owed -= r;
     }
 
-    const uint64_t p = pos.load (std::memory_order_relaxed);
+    const uint64_t p = pos[(size_t) device].load (std::memory_order_relaxed);
     // Frames past this track's end are silence by design, not an underrun.
     const int wanted = p >= t->length ? 0 : (int) std::min<uint64_t> ((uint64_t) n, t->length - p);
     int got = 0;
@@ -216,17 +216,15 @@ int Player::readTrack (int track, float* dstL, float* dstR, int n, uint64_t posF
     {
         underruns.fetch_add ((uint64_t) (wanted - got), std::memory_order_relaxed);
         t->owed += (uint64_t) (wanted - got);
-        if (! underrunLogged)
-        {
-            underrunLogged = true;
-            log.pushRealtime ({ RtEvent::playUnderrun, 0, (uint16_t) track, posForEvents, (uint32_t) (wanted - got) });
-        }
+        if (! underrunLogged.exchange (true))
+            log.pushRealtime ({ RtEvent::playUnderrun, 0, (uint16_t) track, posForEvents, (uint32_t) (wanted - got) }, device);
     }
     return (int) ch;
 }
 
-void Player::advance (int n) noexcept
+void Player::advance (int device, int n) noexcept
 {
-    pos.store (pos.load (std::memory_order_relaxed) + (uint64_t) n, std::memory_order_relaxed);
+    auto& p = pos[(size_t) device];
+    p.store (p.load (std::memory_order_relaxed) + (uint64_t) n, std::memory_order_relaxed);
 }
 } // namespace omr

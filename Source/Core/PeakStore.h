@@ -6,6 +6,7 @@
 // builder), read by the UI. A short mutex is fine here: neither side is the audio thread.
 
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <array>
 #include <mutex>
 
 namespace omr
@@ -16,30 +17,39 @@ public:
     static constexpr int kFramesPerPeak = 512;
     static constexpr int kRatio = 16;
     static constexpr int kLevels = 3;
+    static constexpr int kMaxChannels = 2;     // mono or stereo; stereo keeps separate L/R peaks
 
     void append (const float* x, size_t frames, int channels = 1);   // writer; interleaved when channels > 1
     void finish();                               // writer: flush the last partial bucket
     void clear();
 
     uint64_t frames() const;                     // frames appended so far
+    int numChannels() const;
     bool isComplete() const { return complete.load(); }
 
     // Fill `out[0..width)` with peak magnitude 0..1 for pixels starting at `startFrame`,
     // `framesPerPixel` frames each. Pixels past the data are set to -1.
-    void render (double startFrame, double framesPerPixel, int width, float* out) const;
+    // channel 0 = left/mono, 1 = right, -1 = the louder of both.
+    void render (double startFrame, double framesPerPixel, int width, float* out, int channel = -1) const;
 
-    bool save (const juce::File& f) const;
+    bool save (const juce::File& f) const;      // "OMRPK2" (per channel); loads the older mono "OMRPK1" too
     bool load (const juce::File& f);
 
 private:
-    void pushLevel (int level, uint8_t v);
+    struct Chan
+    {
+        std::vector<uint8_t> lv[kLevels];
+        float acc = 0.0f;
+        uint8_t upAcc[kLevels] {};
+        int upN[kLevels] {};
+    };
+    static void pushLevel (Chan& c, int level, uint8_t v);
+    void renderChannel (const Chan& c, double startFrame, double fpp, int width, float* out) const;
 
     mutable std::mutex lock;
-    std::vector<uint8_t> lv[kLevels];
-    float acc = 0.0f;
+    std::array<Chan, kMaxChannels> chans;
+    int numCh = 1;
     int accN = 0;
-    uint8_t upAcc[kLevels] {};
-    int upN[kLevels] {};
     uint64_t total = 0;
     std::atomic<bool> complete { false };
 };

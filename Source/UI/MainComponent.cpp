@@ -123,9 +123,14 @@ MainComponent::MainComponent()
     bar.monitorLeft.onChange = [this] { const int v = bar.monitorLeft.getSelectedId() - 2; applyPatch ([v] (PatchState& p) { p.monitorLeft = v; return juce::Result::ok(); }); };
     bar.monitorRight.onChange = [this] { const int v = bar.monitorRight.getSelectedId() - 2; applyPatch ([v] (PatchState& p) { p.monitorRight = v; return juce::Result::ok(); }); };
 
+    remote = std::make_unique<RemoteControl> (*props.getUserSettings());
+    remote->onCommand = [this] (const omr::remote::Command& c) { handleRemote (c); };
+    remote->getStatus = [this] { return remoteStatus(); };
+    remote->onLog = [this] (const juce::String& t, bool err) { engine.log().post (err ? Level::warning : Level::info, t); };
+
     audio.onDeviceChanged = [this] { deviceChanged(); };
     std::unique_ptr<juce::XmlElement> saved (props.getUserSettings()->getXmlValue ("audioDevice"));
-    audio.initialise (saved.get());
+    audio.initialise (saved.get(), juce::JSON::parse (props.getUserSettings()->getValue ("extraDevices", "[]")));
     deviceChanged();
 
     engine.log().post (Level::info, "LiveDeck ready. Choose Session > New Session to pick where audio is recorded.");
@@ -136,6 +141,7 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    remote.reset();
    #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu (nullptr);
    #endif
@@ -149,6 +155,7 @@ void MainComponent::saveDeviceState()
 {
     if (auto xml = audio.getDeviceManager().createStateXml())
         props.getUserSettings()->setValue ("audioDevice", xml.get());
+    props.getUserSettings()->setValue ("extraDevices", juce::JSON::toString (audio.extraDevicesState(), true));
     props.getUserSettings()->setValue ("lastDir", lastDir.getFullPathName());
     props.saveIfNeeded();
 }
@@ -207,7 +214,7 @@ void MainComponent::applyPatch (const std::function<juce::Result (PatchState&)>&
     }
     for (auto it = selectedIds.begin(); it != selectedIds.end();)
         it = rowForTrackId (patch, *it) < 0 ? selectedIds.erase (it) : std::next (it);
-    if (wasMirror && ! patch.mirror) engine.log().post (Level::info, "Mirror 1:1 turned off by a manual routing edit; current mapping kept.");
+    if (wasMirror && ! patch.mirror) engine.log().post (Level::info, "Mirror off: an output was patched by hand. Turn it back on to make outputs follow inputs again.");
     engine.setPatch (patch);
     if (patch.tracks.size() != before) rebuildStrips();
     else refreshStrips();
@@ -216,8 +223,10 @@ void MainComponent::applyPatch (const std::function<juce::Result (PatchState&)>&
 
 void MainComponent::deviceChanged()
 {
-    const auto r = setDeviceChannels (patch, audio.inputNames(), audio.outputNames());
-    if (r.failed()) engine.log().post (Level::warning, r.getErrorMessage());
+    const auto r = setDeviceChannels (patch, audio.inputNames(), audio.outputNames(), audio.inputActive(), audio.outputActive());
+    patch.devices = audio.layouts();
+    if (r.failed() && r.getErrorMessage() != lastDeviceWarning) engine.log().post (Level::warning, r.getErrorMessage());
+    lastDeviceWarning = r.failed() ? r.getErrorMessage() : juce::String();
     if (auto* dev = audio.getDeviceManager().getCurrentAudioDevice())
     {
         session.deviceType = dev->getTypeName();
@@ -272,7 +281,8 @@ void MainComponent::rebuildStrips()
         };
         stripHolder.addAndMakeVisible (s);
     }
-    for (auto* s : strips) s->setChannelLists (ins, outs);
+    const auto inAct = audio.inputActive(), outAct = audio.outputActive();
+    for (auto* s : strips) s->setChannelLists (ins, outs, inAct, outAct);
     bridge.setTracks (patch.tracks);
     refreshStrips();
     if (! engine.isRecording()) refreshTimeline (false);
@@ -285,7 +295,7 @@ void MainComponent::refreshStrips()
     for (int i = 0; i < strips.size() && i < (int) patch.tracks.size(); ++i)
         strips[i]->showTrack (patch.tracks[(size_t) i], patch.mirror, rec);
     bar.mirrorToggle.setToggleState (patch.mirror, juce::dontSendNotification);
-    bar.mirrorToggle.setEnabled (! rec);
+    bar.mirrorToggle.setEnabled (true);   // only ties outputs to inputs: safe during a take
     bar.addTrack.setEnabled (! rec);
     bar.removeTrack.setEnabled (! rec);
     bridge.setTracks (patch.tracks);
@@ -470,7 +480,7 @@ void MainComponent::showViewMenu()
 
 juce::StringArray MainComponent::getMenuBarNames()
 {
-    return { "File", "Transport", "Disks", "View", "Help" };
+    return { "File", "Transport", "Tracks", "Disks", "View", "Help" };
 }
 
 static juce::PopupMenu::Item menuItem (const juce::String& text, const juce::String& shortcut, bool enabled, bool ticked,
@@ -521,9 +531,25 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Stop", cmd + ".", true, false, [this] { stopTransport(); }));
             m.addItem (menuItem ("Return to Zero", "Return", ! rec, false, [this] { returnToZero(); }));
             m.addItem (menuItem ("Add Marker", "M", hasSession, false, [this] { addMarker(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Remote Control (OSC / MIDI)...", "", true, false, [this] { showRemoteSettings(); }));
             break;
 
-        case 2: // Disks
+        case 2: // Tracks
+            m.addItem (menuItem ("Add Track", "", ! rec, false, [this] { applyPatch ([this] (PatchState& p) { return addTrack (p, engine.isRecording()); }); }));
+            m.addItem (menuItem ("Add Multiple Tracks...", "", ! rec, false, [this] { showAddTracksDialog(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Select All Tracks", cmd + "A", ! patch.tracks.empty(), false, [this] { for (const auto& t : patch.tracks) selectedIds.insert (t.id); refreshStrips(); }));
+            m.addItem (menuItem ("Delete Selected Tracks", "Delete", ! rec && ! selectedIds.empty(), false, [this] { deleteSelectedTracks(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Mirror Input to Output", "", true, patch.mirror, [this]
+            {
+                const bool want = ! patch.mirror;
+                applyPatch ([want] (PatchState& p) { return setMirror (p, want, false); });
+            }));
+            break;
+
+        case 3: // Disks
             m.addItem (menuItem ("Change Primary Folder (Disk A)...", "", ! rec, false, [this] { newSession (session.name); }));
             m.addItem (menuItem ("Set Redundant Folder (Disk B)...", "", ! rec, false, [this] { chooseSecondary(); }));
             m.addItem (menuItem ("Remove Disk B", "", ! rec && session.secondaryRoot != juce::File(), false,
@@ -532,7 +558,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Benchmark Disks", "", ! rec && ! benchmarkRunning && hasSession, false, [this] { runBenchmark(); }));
             break;
 
-        case 3: // View
+        case 4: // View
             m.addItem (menuItem ("Show Mixer", "", true, showMixer, [this] { showMixer = ! showMixer; props.getUserSettings()->setValue ("showMixer", showMixer); resized(); }));
             m.addItem (menuItem ("Show Meter Bridge", "", true, showBridge, [this] { showBridge = ! showBridge; props.getUserSettings()->setValue ("showBridge", showBridge); resized(); }));
             m.addItem (menuItem ("Show Event Console", "", true, showConsole, [this] { showConsole = ! showConsole; props.getUserSettings()->setValue ("showConsole", showConsole); resized(); }));
@@ -542,9 +568,10 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Zoom to Fit", cmd + "0", true, false, [this] { timeline.zoomToFit(); }));
             m.addSeparator();
             m.addItem (menuItem ("Audio Setup...", cmd + ",", true, false, [this] { showAudioSetup(); }));
+            m.addItem (menuItem ("Additional Audio Devices...", "", ! rec, false, [this] { showExtraDevices(); }));
             break;
 
-        case 4: // Help
+        case 5: // Help
             m.addItem (menuItem ("About LiveDeck", "", true, false, [this] { showAbout(); }));
             m.addItem (menuItem ("Check for Updates...", "", ! updateBusy, false, [this] { checkForUpdates (true); }));
             m.addItem (menuItem ("Check for Updates Automatically", "", true, autoUpdateCheck, [this]
@@ -616,7 +643,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
     return false;
 }
 
-void MainComponent::addMarker()
+void MainComponent::addMarker (const juce::String& requestedLabel)
 {
     if (session.primaryRoot == juce::File()) return;
     const bool rec = engine.isRecording();
@@ -624,7 +651,8 @@ void MainComponent::addMarker()
     if (take <= 0) return;
     const uint64_t frame = rec ? engine.recordedFrames() : (engine.isPlaying() ? engine.playbackPosition() : cueFrames);
     const double secs = (double) frame / engine.sampleRate();
-    const auto label = "M" + juce::String ((int) loadMarkers (take).size() + 1);
+    const auto clean = requestedLabel.removeCharacters (",\"\r\n").trim().substring (0, 40);
+    const auto label = clean.isNotEmpty() ? clean : "M" + juce::String ((int) loadMarkers (take).size() + 1);
     const auto f = SessionPaths::markersDir (session.primaryRoot).getChildFile ("markers.csv");
     if (! f.existsAsFile()) f.replaceWithText ("take,seconds,sample,time_of_day,label\n", false, false, "\n");
     f.appendText (juce::String (take) + "," + juce::String (secs, 3) + "," + juce::String ((juce::int64) frame) + ","
@@ -660,7 +688,7 @@ void MainComponent::timerCallback()
     if (engine.isRecording())
     {
         const double limit = juce::jmax (0.5, 8.0 * audio.bufferSize() / juce::jmax (1.0, engine.sampleRate()));
-        const double since = engine.secondsSinceLastCallback();
+        const double since = engine.worstSecondsSinceCallback();
         if (since > limit && ! noAudioLogged)
         {
             engine.log().post (Level::error, "NO AUDIO from driver for " + juce::String (since, 1) + " s while recording");
@@ -728,6 +756,21 @@ void MainComponent::updateStatus()
     const double measured = engine.measuredSampleRate();
     s.clockKnown = measured > 0 && engine.isDeviceRunning();
     s.ppm = s.clockKnown ? (measured / engine.sampleRate() - 1.0) * 1.0e6 : 0.0;
+    s.devices = engine.numRunningDevices();
+    for (int d = 1; d < omr::kMaxDevices; ++d)
+    {
+        if (! engine.isDeviceRunning (d) || engine.measuredSampleRate (d) <= 0 || ! s.clockKnown) continue;
+        const double drift = engine.driftPpm (d);
+        s.driftKnown = true;
+        s.worstDrift = std::abs (drift) > std::abs (s.worstDrift) ? drift : s.worstDrift;
+        if (std::abs (drift) > 5.0 && ! driftWarned[(size_t) d])
+        {
+            driftWarned[(size_t) d] = true;
+            engine.log().post (Level::warning, "Device " + juce::String (d + 1) + " drifts " + juce::String (drift, 1)
+                                               + " ppm against the primary: it is not on the same word clock. Its tracks are recorded at its own clock (never resampled); "
+                                                 "clock both devices from one source to keep them sample-locked.");
+        }
+    }
 
     int armed = 0;
     for (const auto& t : patch.tracks) armed += (t.armed && t.input >= 0) ? 1 : 0;
@@ -1299,4 +1342,229 @@ void MainComponent::moveSelectedTo (int insertBefore)
     applyPatch ([this, rows, insertBefore, &newRows] (PatchState& p) { return moveTracks (p, rows, insertBefore, engine.isRecording(), &newRows); });
     if (! newRows.empty()) anchorRow = newRows.front();
     refreshTimeline (false);   // waveforms follow their tracks (take manifest)
+}
+
+void MainComponent::showAddTracksDialog()
+{
+    if (engine.isRecording()) return;
+    textDialog = std::make_unique<juce::AlertWindow> ("Add Multiple Tracks",
+                                                      "Tracks are patched to consecutive inputs that are ticked in Audio Setup.",
+                                                      juce::MessageBoxIconType::NoIcon, this);
+    const int firstFree = firstUnusedInput (patch, false);
+    int freeCount = 0;
+    for (int ch = juce::jmax (0, firstFree); ch < patch.numInputs; ++ch) freeCount += isInputActive (patch, ch) ? 1 : 0;
+    textDialog->addTextEditor ("count", juce::String (juce::jmax (1, freeCount)), "How many tracks");
+    textDialog->addTextEditor ("first", juce::String (firstFree >= 0 ? firstFree + 1 : 1), "Starting at input");
+    textDialog->addComboBox ("width", { "Mono", "Stereo pairs" }, "Track width");
+    textDialog->addButton ("Add", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    textDialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    textDialog->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int result)
+    {
+        const int count = textDialog->getTextEditorContents ("count").getIntValue();
+        const int first = textDialog->getTextEditorContents ("first").getIntValue() - 1;
+        const bool stereo = textDialog->getComboBoxComponent ("width")->getSelectedItemIndex() == 1;
+        juce::MessageManager::callAsync ([this] { textDialog.reset(); });
+        if (result != 1) return;
+        applyPatch ([this, count, first, stereo] (PatchState& p) { return addTracks (p, count, first, stereo, engine.isRecording()); });
+    }), false);
+}
+
+// ------------------------------------------------------------------------------------ remote control
+
+void MainComponent::handleRemote (const omr::remote::Command& c)
+{
+    using omr::remote::Action;
+    const auto who = "Remote: " + omr::remote::actionName (c.action);
+    auto setTrackFlag = [this, &c, &who] (int which)
+    {
+        if (c.track < 0 || c.track >= (int) patch.tracks.size()) { engine.log().post (Level::warning, who + ": no track " + juce::String (c.track + 1)); return; }
+        const auto& t = patch.tracks[(size_t) c.track];
+        const bool current = which == 0 ? t.armed : (which == 1 ? t.mute : t.solo);
+        const bool want = c.value < 0 ? ! current : c.value == 1;
+        const int row = c.track;
+        if (which == 0) applyPatch ([this, row, want] (PatchState& p) { return setArmed (p, row, want, engine.isRecording()); });
+        else if (which == 1) applyPatch ([row, want] (PatchState& p) { p.tracks[(size_t) row].mute = want; return juce::Result::ok(); });
+        else applyPatch ([row, want] (PatchState& p) { p.tracks[(size_t) row].solo = want; return juce::Result::ok(); });
+    };
+
+    switch (c.action)
+    {
+        case Action::record:
+            if (session.primaryRoot == juce::File()) { engine.log().post (Level::warning, who + " ignored: no session folder yet"); return; }
+            if (! engine.isRecording()) startRecording();
+            break;
+        case Action::stop:     stopTransport(); break;
+        case Action::play:     if (! engine.isRecording() && ! engine.isPlaying()) startPlayback(); break;
+        case Action::playStop:
+            if (engine.isRecording()) engine.log().post (Level::info, who + ": recording continues (play/stop never stops a take)");
+            else if (engine.isPlaying()) stopTransport();
+            else startPlayback();
+            break;
+        case Action::rtz:      if (! engine.isRecording()) returnToZero(); break;
+        case Action::marker:   addMarker (c.text); break;
+        case Action::locate:
+            if (engine.isRecording()) return;
+            cueFrames = (uint64_t) juce::jmax (0.0, c.seconds * engine.sampleRate());
+            timeline.setPlayhead (cueFrames);
+            if (engine.isPlaying()) startPlayback();
+            break;
+        case Action::selectTake:
+            if (engine.isRecording()) return;
+            if (bar.takeCombo.indexOfItemId (c.value) >= 0) bar.takeCombo.setSelectedId (c.value);
+            else engine.log().post (Level::warning, who + ": no take " + juce::String (c.value));
+            break;
+        case Action::nextTake:
+        case Action::prevTake:
+        {
+            if (engine.isRecording()) return;
+            const int idx = bar.takeCombo.getSelectedItemIndex() + (c.action == Action::nextTake ? 1 : -1);
+            if (idx >= 0 && idx < bar.takeCombo.getNumItems()) bar.takeCombo.setSelectedItemIndex (idx);
+            break;
+        }
+        case Action::armTrack:  setTrackFlag (0); break;
+        case Action::muteTrack: setTrackFlag (1); break;
+        case Action::soloTrack: setTrackFlag (2); break;
+        case Action::armAll:
+        {
+            const bool want = c.value != 0;
+            applyPatch ([this, want] (PatchState& p)
+            {
+                for (int i = 0; i < (int) p.tracks.size(); ++i)
+                    if (auto r = setArmed (p, i, want, engine.isRecording()); r.failed()) return r;
+                return juce::Result::ok();
+            });
+            break;
+        }
+        case Action::ping:
+        case Action::none:
+            break;
+    }
+}
+
+RemoteStatus MainComponent::remoteStatus()
+{
+    RemoteStatus s;
+    s.recording = engine.isRecording();
+    s.playing = engine.isPlaying();
+    const double rate = juce::jmax (1.0, engine.sampleRate());
+    s.seconds = s.recording ? (double) engine.recordedFrames() / rate
+              : s.playing   ? (double) engine.playbackPosition() / rate
+                            : (double) cueFrames / rate;
+    const auto total = (int) s.seconds;
+    s.timecode = juce::String::formatted ("%02d:%02d:%02d:%02d", total / 3600, total / 60 % 60, total % 60, (int) ((s.seconds - total) * 30.0));
+    s.session = session.name;
+    s.take = s.recording ? engine.currentTake() : bar.takeCombo.getSelectedId();
+    s.nextTake = session.nextTake;
+    s.dropouts = (int) engine.xrunCount() + audio.driverXruns();
+    int armed = 0;
+    for (const auto& t : patch.tracks) armed += (t.armed && t.input >= 0) ? 1 : 0;
+    const double bytesPerSec = rate * (session.bitsPerSample / 8) * juce::jmax (1, armed);
+    for (int i = 0; i < 2; ++i)
+    {
+        const auto root = i == 0 ? session.primaryRoot : session.secondaryRoot;
+        if (root == juce::File()) continue;
+        const double hours = (double) (root.exists() ? root : root.getParentDirectory()).getBytesFreeOnVolume() / bytesPerSec / 3600.0;
+        const auto* t = engine.target (i);
+        const bool ok = ! (s.recording && t != nullptr && t->failed.load());
+        if (i == 0) { s.diskAHours = hours; s.diskAOk = ok; } else { s.diskBHours = hours; s.diskBOk = ok; }
+    }
+    for (const auto& t : patch.tracks) s.tracks.push_back ({ t.name, t.armed, t.mute, t.solo });
+    return s;
+}
+
+void MainComponent::showRemoteSettings()
+{
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (new RemoteSettingsComponent (*remote));
+    o.dialogTitle = "Remote Control: OSC (Bitfocus Companion) and MIDI";
+    o.dialogBackgroundColour = Theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = true;
+    o.componentToCentreAround = this;
+    o.launchAsync();
+}
+
+// ------------------------------------------------------------------------------------ extra devices
+
+namespace
+{
+class ExtraDevicesComponent final : public juce::Component
+{
+public:
+    ExtraDevicesComponent (AudioEngine& a, std::function<void()> done) : audio (a), onDone (std::move (done))
+    {
+        info.setText ("Record from several interfaces at once (for example Dante and MADI). Each device runs at the primary "
+                      "device's sample rate and buffer size, and keeps its own clock: its tracks are recorded bit-exact and the "
+                      "drift is shown in the CLOCK chip. For sample-locked files, clock every device from one word clock / PTP source.\n\n"
+                      "Inputs and outputs of extra devices are added after the primary's (\"Device: channel\"). Direct outs must be on "
+                      "the same device as the track's input. Removing a device in the middle renumbers the ones after it.",
+                      juce::dontSendNotification);
+        info.setJustificationType (juce::Justification::topLeft);
+        info.setFont (Theme::ui (12.5f));
+        addAndMakeVisible (info);
+
+        auto names = audio.availableExtraDevices();
+        const auto chosen = audio.extraDeviceNames();
+        for (const auto& c : chosen) if (! names.contains (c)) names.add (c);   // configured but offline
+        for (const auto& n : names)
+        {
+            auto* t = toggles.add (new juce::ToggleButton (n + (audio.availableExtraDevices().contains (n) ? juce::String() : juce::String ("  (offline)"))));
+            t->setToggleState (chosen.contains (n), juce::dontSendNotification);
+            t->getProperties().set ("deviceName", n);
+            addAndMakeVisible (t);
+        }
+        if (names.isEmpty())
+        {
+            empty.setText ("No other devices of this driver type were found.", juce::dontSendNotification);
+            addAndMakeVisible (empty);
+        }
+        ok.onClick = [this]
+        {
+            juce::StringArray selected;
+            for (auto* t : toggles) if (t->getToggleState()) selected.add (t->getProperties()["deviceName"].toString());
+            audio.setExtraDevices (selected);
+            if (onDone) onDone();
+            if (auto* w = findParentComponentOfClass<juce::DialogWindow>()) w->exitModalState (1);
+        };
+        cancel.onClick = [this] { if (auto* w = findParentComponentOfClass<juce::DialogWindow>()) w->exitModalState (0); };
+        addAndMakeVisible (ok);
+        addAndMakeVisible (cancel);
+        setSize (560, 220 + 28 * juce::jmax (1, toggles.size()));
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (Theme::panel); }
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (16);
+        info.setBounds (r.removeFromTop (130));
+        r.removeFromTop (6);
+        for (auto* t : toggles) t->setBounds (r.removeFromTop (26));
+        if (empty.isVisible()) empty.setBounds (r.removeFromTop (26));
+        auto b = r.removeFromBottom (28);
+        cancel.setBounds (b.removeFromRight (90));
+        b.removeFromRight (8);
+        ok.setBounds (b.removeFromRight (90));
+    }
+
+private:
+    AudioEngine& audio;
+    std::function<void()> onDone;
+    juce::Label info, empty;
+    juce::OwnedArray<juce::ToggleButton> toggles;
+    juce::TextButton ok { "Use These" }, cancel { "Cancel" };
+};
+}
+
+void MainComponent::showExtraDevices()
+{
+    if (engine.isRecording()) return;
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (new ExtraDevicesComponent (audio, [this] { driftWarned = {}; saveDeviceState(); }));
+    o.dialogTitle = "Additional Audio Devices";
+    o.dialogBackgroundColour = Theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.componentToCentreAround = this;
+    o.launchAsync();
 }

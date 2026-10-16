@@ -38,7 +38,7 @@ public:
     // Audio thread. Never blocks: if the ring is full the frames are dropped and a Gap is recorded,
     // which the writer turns into silence so every file stays sample-aligned.
     // `right` is used only by stereo tracks (nullptr = repeat left).
-    void push (int track, const float* left, const float* right, size_t n, uint64_t takeFramePos) noexcept;
+    void push (int track, const float* left, const float* right, size_t n, uint64_t takeFramePos, int device = 0) noexcept;
 
     // Control thread, after the audio thread has stopped calling push().
     void flushOpenGaps() noexcept;

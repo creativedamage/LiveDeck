@@ -1,6 +1,7 @@
 #pragma once
 #include "Audio/AudioEngine.h"
 #include "ChannelStrip.h"
+#include "RemoteControl.h"
 #include "TimelineView.h"
 #include "TransportBar.h"
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -55,7 +56,10 @@ private:
 
     // transport
     void startRecording();
-    void addMarker();
+    void addMarker (const juce::String& label = {});
+    void handleRemote (const omr::remote::Command& c);
+    RemoteStatus remoteStatus();
+    void showRemoteSettings();
     void startPlayback();
     void stopTransport();
     void returnToZero();
@@ -113,6 +117,10 @@ private:
     int consoleLines = 0;
     int tick = 0;
     int lastMenuState = -1;
+    juce::String lastDeviceWarning;
+    void showAddTracksDialog();
+    void showExtraDevices();
+    std::array<bool, omr::kMaxDevices> driftWarned {};
     std::set<int> selectedIds;
     int anchorRow = -1;
     juce::Component stripDropMarker;
@@ -132,6 +140,7 @@ private:
     uint64_t cueFrames = 0;
     std::map<int, uint64_t> takeLengths;     // take -> frames (longest track)
     juce::ApplicationProperties props;
+    std::unique_ptr<RemoteControl> remote;   // after props (it reads its settings from them)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

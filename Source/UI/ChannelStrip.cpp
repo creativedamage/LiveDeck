@@ -61,32 +61,44 @@ ChannelStrip::ChannelStrip (int t) : track (t)
     addAndMakeVisible (*solo);
 }
 
-void ChannelStrip::setChannelLists (const juce::StringArray& ins, const juce::StringArray& outs)
+void ChannelStrip::setChannelLists (const juce::StringArray& ins, const juce::StringArray& outs,
+                                    const std::vector<bool>& inActive, const std::vector<bool>& outActive)
 {
     input.clear (juce::dontSendNotification);
     output.clear (juce::dontSendNotification);
-    auto fill = [] (juce::ComboBox& c, const juce::StringArray& names)
+    auto fill = [] (juce::ComboBox& c, const juce::StringArray& names, const std::vector<bool>& active)
     {
+        auto on = [&] (int i) { return active.empty() || (i < (int) active.size() && active[(size_t) i]); };
         c.addItem ("-- none --", 1);
         c.addSectionHeading ("Mono");
-        for (int i = 0; i < names.size(); ++i) c.addItem (juce::String (i + 1) + "  " + names[i], i + 2);
+        for (int i = 0; i < names.size(); ++i)
+            if (on (i)) c.addItem (juce::String (i + 1) + "  " + names[i], i + 2);
         if (names.size() >= 2)
         {
             c.addSectionHeading ("Stereo");
             for (int i = 0; i + 1 < names.size(); i += 2)
-                c.addItem (juce::String (i + 1) + "-" + juce::String (i + 2) + " ST  " + names[i] + " / " + names[i + 1], kStereoId + i);
+                if (on (i) && on (i + 1))
+                    c.addItem (juce::String (i + 1) + "-" + juce::String (i + 2) + " ST  " + names[i] + " / " + names[i + 1], kStereoId + i);
         }
     };
-    fill (input, ins);
-    fill (output, outs);
+    fill (input, ins, inActive);
+    fill (output, outs, outActive);
 }
 
 void ChannelStrip::showTrack (const omr::TrackState& t, bool mirror, bool recording)
 {
     if (! name.isBeingEdited()) name.setText (t.name, juce::dontSendNotification);
     if (const auto c = Theme::trackColour (t.id - 1, t.colour); c != colour) { colour = c; repaint(); }
-    input.setSelectedId (t.input < 0 ? 1 : (t.stereo ? kStereoId + t.input : t.input + 2), juce::dontSendNotification);
-    output.setSelectedId (t.outputs.empty() ? 1 : (t.outStereo ? kStereoId + t.outputs.front() : t.outputs.front() + 2), juce::dontSendNotification);
+    // A patch to a channel that is unticked / missing right now stays as it is, shown as "(off)".
+    auto show = [] (juce::ComboBox& c, int id, int ch, bool stereo)
+    {
+        if (c.indexOfItemId (id) >= 0) { c.setSelectedId (id, juce::dontSendNotification); return; }
+        c.setText ((stereo ? juce::String (ch + 1) + "-" + juce::String (ch + 2) + " ST" : juce::String (ch + 1)) + " (off)", juce::dontSendNotification);
+    };
+    if (t.input < 0) input.setSelectedId (1, juce::dontSendNotification);
+    else show (input, t.stereo ? kStereoId + t.input : t.input + 2, t.input, t.stereo);
+    if (t.outputs.empty()) output.setSelectedId (1, juce::dontSendNotification);
+    else show (output, t.outStereo ? kStereoId + t.outputs.front() : t.outputs.front() + 2, t.outputs.front(), t.outStereo);
     if (stereoState != t.stereo) { stereoState = t.stereo; repaint(); }
     if (! trim.isMouseButtonDown()) trim.setValue (t.trimDb, juce::dontSendNotification);
 
@@ -96,8 +108,7 @@ void ChannelStrip::showTrack (const omr::TrackState& t, bool mirror, bool record
 
     // Visual lockouts: in mirror mode the routing is automatic; while recording an armed
     // track's source and every arm button are frozen.
-    input.setAlpha (mirror ? 0.55f : 1.0f);
-    output.setAlpha (mirror ? 0.55f : 1.0f);
+    output.setAlpha (mirror ? 0.55f : 1.0f);   // in mirror mode the output follows the input
     input.setEnabled (! (recording && t.armed));
     arm->setEnabled (! recording);
 

@@ -11,6 +11,7 @@
 #include "Core/SpscRing.h"
 #include "Core/PeakStore.h"
 #include "Core/Updater.h"
+#include "Core/Remote.h"
 
 #include <set>
 using namespace omr;
@@ -129,42 +130,70 @@ static void testRecovery()
     CHECK (after != nullptr && after->lengthInSamples == 96000);
 }
 
+// Device channels + one mono track per input, outputs mirrored (what most tests start from).
+static void setupTracks (PatchState& p, const juce::StringArray& ins, const juce::StringArray& outs, bool mirror = true)
+{
+    setDeviceChannels (p, ins, outs);
+    addTracks (p, ins.size(), 0, false, false);
+    setMirror (p, mirror, false);
+}
+
 static void testPatch()
 {
-    SECTION ("Patching: 1:1 mirror, manual edits, record locks, mults");
+    SECTION ("Patching: mirror = outputs follow inputs, never creates tracks; mults; locks; active channels");
     PatchState s;
     juce::StringArray ins, outs;
     for (int i = 0; i < 64; ++i) { ins.add ("DVS " + juce::String (i + 1)); outs.add ("Out " + juce::String (i + 1)); }
     CHECK (setDeviceChannels (s, ins, outs).wasOk());
-    CHECK (s.mirror && s.tracks.size() == 64);
-    CHECK (s.tracks[10].input == 10 && s.tracks[10].outputs.size() == 1 && s.tracks[10].outputs[0] == 10);
-    CHECK (s.tracks[10].name == "DVS 11");
+    CHECK (s.tracks.empty());                                  // a device never creates tracks by itself
 
-    CHECK (setTrackInput (s, 5, 0, false).wasOk());           // mult: track 1 and 6 both take input 1
-    CHECK (! s.mirror);
-    CHECK (s.tracks[5].input == 0 && s.tracks[0].input == 0 && s.tracks[6].input == 6);
+    CHECK (addTracks (s, 8, 0, false, false).wasOk() && s.tracks.size() == 8);
+    CHECK (s.mirror && s.tracks[5].input == 5 && s.tracks[5].outputs.size() == 1 && s.tracks[5].outputs[0] == 5);
+    CHECK (s.tracks[5].name == "DVS 6");
 
-    CHECK (setMirror (s, true, true).failed());               // locked while recording
-    CHECK (setTrackInput (s, 3, 9, true).failed());           // armed track locked while recording
+    CHECK (setTrackInput (s, 5, 20, false).wasOk());           // mirror: output follows the new input
+    CHECK (s.mirror && s.tracks[5].outputs[0] == 20);
+    CHECK (setTrackInput (s, 5, 0, false).wasOk());            // mult: tracks 1 and 6 both take input 1
+    CHECK (s.tracks[5].input == 0 && s.tracks[0].input == 0 && s.tracks[5].outputs[0] == 0);
+    CHECK (setTrackInput (s, 2, 10, false, true).wasOk());     // stereo pair in 11-12 -> out 11-12 stereo
+    CHECK (s.tracks[2].outStereo && s.tracks[2].outputs[0] == 10);
+
+    CHECK (setTrackOutput (s, 3, 20).wasOk() && ! s.mirror);   // a manual output turns mirror off
+    CHECK (setTrackInput (s, 4, 30, false).wasOk() && s.tracks[4].outputs[0] == 4);   // outputs no longer follow
+    CHECK (setTrackInput (s, 3, 9, true).failed());            // armed track's input locked while recording
     CHECK (setArmed (s, 3, false, true).failed());
-    CHECK (setTrackOutput (s, 3, 20).wasOk());                // outputs stay editable
+    CHECK (setMirror (s, true, true).wasOk() && s.tracks[4].outputs[0] == 30);   // allowed while recording
 
-    CHECK (setMirror (s, true, false).wasOk());
-    CHECK (s.tracks[5].input == 5);
+    // + Track takes the first input no track uses; inactive (unchecked) channels are skipped
+    std::vector<bool> active (64, true);
+    for (int ch = 1; ch <= 9; ++ch) active[(size_t) ch] = false;
+    setDeviceChannels (s, ins, outs, active);
+    // used: 0, 1, 3, 6, 7, 10-11 (stereo), 30; off: 2-9 -> first free mono input is 12, first free pair 14-15
+    CHECK (addTrack (s, false).wasOk() && s.tracks.back().input == 12);
+    CHECK (firstUnusedInput (s, true) == 14);
 
+    // Regression: delete every track, then the device changes (rate, reconnect): nothing comes back.
+    std::vector<int> all;
+    for (int i = 0; i < (int) s.tracks.size(); ++i) all.push_back (i);
+    CHECK (deleteTracks (s, all, false).wasOk() && s.tracks.empty());
+    setDeviceChannels (s, ins, outs);
+    setMirror (s, true, false);
+    setDeviceChannels (s, ins, outs);
+    CHECK (s.tracks.empty());
+
+    // A device with fewer channels keeps the patch (reported, not erased)
+    addTracks (s, 2, 40, false, false);
     renameTrack (s, 0, "Kick In");
-    CHECK (s.tracks[0].name == "Kick In" && ! s.tracks[0].autoName);
     ins.clear(); outs.clear();
     for (int i = 0; i < 32; ++i) { ins.add ("MADI " + juce::String (i + 1)); outs.add ("O" + juce::String (i + 1)); }
-    setDeviceChannels (s, ins, outs);
-    CHECK (s.tracks.size() == 32 && s.tracks[0].name == "Kick In" && s.tracks[1].name == "MADI 2");
+    CHECK (setDeviceChannels (s, ins, outs).failed());          // warns ...
+    CHECK (s.tracks.size() == 2 && s.tracks[0].input == 40 && s.tracks[0].name == "Kick In");   // ... but keeps it
 
-    s.tracks[2].solo = true;
+    s.tracks[1].solo = true;
     auto snap = compileSnapshot (s, 7);
-    CHECK (snap->numTracks == 32 && snap->anySolo && snap->generation == 7 && snap->tracks[31].input == 31);
-
+    CHECK (snap->numTracks == 2 && snap->anySolo && snap->generation == 7 && snap->tracks[1].input == -1);   // channel 42 absent: silence
     auto round = patchFromVar (juce::JSON::parse (juce::JSON::toString (patchToVar (s))));
-    CHECK (round.tracks.size() == 32 && round.tracks[0].name == "Kick In" && round.tracks[2].solo && round.mirror);
+    CHECK (round.tracks.size() == 2 && round.tracks[0].name == "Kick In" && round.tracks[1].solo && round.mirror);
 }
 
 // Drives the engine like a device would: blocks of `block` frames on this thread.
@@ -201,7 +230,7 @@ static void testEngine128()
     juce::StringArray ins, outs;
     for (int i = 0; i < 128; ++i) ins.add ("Ch " + juce::String (i + 1));
     outs.add ("L"); outs.add ("R");
-    setDeviceChannels (p, ins, outs);
+    setupTracks (p, ins, outs);
     p.tracks[127].armed = false;
     e.setPatch (p);
 
@@ -257,7 +286,7 @@ static void testOverrun()
     PatchState p;
     juce::StringArray ins, outs;
     for (int i = 0; i < 8; ++i) ins.add ("In " + juce::String (i + 1));
-    setDeviceChannels (p, ins, outs);
+    setupTracks (p, ins, outs);
     e.setPatch (p);
 
     SessionSettings s;
@@ -312,7 +341,7 @@ static void testPlayback()
     PatchState p;
     juce::StringArray ins, outs;
     for (int i = 0; i < 8; ++i) { ins.add ("In " + juce::String (i + 1)); outs.add ("Out " + juce::String (i + 1)); }
-    setDeviceChannels (p, ins, outs);             // mirror: track n -> output n
+    setupTracks (p, ins, outs);                   // mirror: track n -> output n
     p.tracks[5].armed = false;                    // track 6 not recorded -> silent in playback
     e.setPatch (p);
     SessionSettings s; s.primaryRoot = root; s.minFreeHours = 0.01;
@@ -416,8 +445,7 @@ static void testStereo()
     PatchState p;
     juce::StringArray ins, outs;
     for (int i = 0; i < 6; ++i) { ins.add ("In " + juce::String (i + 1)); outs.add ("Out " + juce::String (i + 1)); }
-    setDeviceChannels (p, ins, outs);
-    setMirror (p, false, false);
+    setupTracks (p, ins, outs, false);
     while (p.tracks.size() > 3) removeLastTrack (p, false);
     CHECK (setTrackInput (p, 0, 0, false, false).wasOk());          // track 1: mono, input 1
     CHECK (setTrackInput (p, 1, 2, false, true).wasOk());           // track 2: stereo, inputs 3-4
@@ -539,7 +567,7 @@ static void testTrackEditing()
     PatchState p;
     juce::StringArray ins, outs;
     for (int i = 0; i < 6; ++i) { ins.add ("In " + juce::String (i + 1)); outs.add ("Out " + juce::String (i + 1)); }
-    setDeviceChannels (p, ins, outs);
+    setupTracks (p, ins, outs);
     CHECK (p.tracks.size() == 6);
     std::set<int> ids;
     for (auto& t : p.tracks) ids.insert (t.id);
@@ -561,7 +589,7 @@ static void testTrackEditing()
     // Drag tracks 4 and 5 (rows 3,4) to the top; then delete what is now row 2 (old track 1).
     std::vector<int> moved;
     CHECK (moveTracks (p, { 3, 4 }, 0, false, &moved).wasOk());
-    CHECK (! p.mirror && moved.size() == 2 && moved[0] == 0 && moved[1] == 1);
+    CHECK (p.mirror && moved.size() == 2 && moved[0] == 0 && moved[1] == 1);   // reordering keeps mirror mode
     CHECK (p.tracks[0].id == idOf3 && p.tracks[2].id == idOf0);
     CHECK (moveTracks (p, { 0 }, 3, true).failed());                 // locked while recording
     CHECK (deleteTracks (p, { 2 }, false).wasOk() && p.tracks.size() == 5 && rowForTrackId (p, idOf0) < 0);
@@ -594,12 +622,192 @@ static void testTrackEditing()
     // A take recorded before manifests existed: linking it once makes it follow later reorders.
     SessionPaths::takeManifest (root, 1).deleteFile();
     PatchState q;
-    setDeviceChannels (q, ins, outs);
+    setupTracks (q, ins, outs);
     CHECK (writeManifestIfMissing (root, 1, q) && ! writeManifestIfMissing (root, 1, q));
     const int idTrack6 = q.tracks[5].id;
     moveTracks (q, { 5 }, 0, false);
     auto legacy = resolveTakeFiles (root, 1, q);
     CHECK (legacy.count (0) && legacy[0].getFileName().startsWith ("T06_") && q.tracks[0].id == idTrack6);
+}
+
+static void testStereoPeaks()
+{
+    SECTION ("Stereo waveforms: separate L/R peaks, v2 cache, old mono caches rebuilt");
+    const int sr = 48000, n = sr * 5;
+    std::vector<float> x ((size_t) n * 2, 0.0f);                    // interleaved
+    for (int i = sr; i < 2 * sr; ++i) x[(size_t) (2 * i)] = (i % 2 ? 1.0f : -1.0f);      // L: full scale 1-2 s
+    for (int i = 3 * sr; i < 4 * sr; ++i) x[(size_t) (2 * i + 1)] = (i % 2 ? 0.3f : -0.3f); // R: 0.3 at 3-4 s
+    PeakStore p;
+    p.append (x.data(), (size_t) n, 2);
+    p.finish();
+    CHECK (p.numChannels() == 2 && p.frames() == (uint64_t) n);
+    std::vector<float> l (500), r (500), both (500);
+    const double fpp = (double) n / 500.0;
+    p.render (0, fpp, 500, l.data(), 0);
+    p.render (0, fpp, 500, r.data(), 1);
+    p.render (0, fpp, 500, both.data(), -1);
+    CHECK (l[150] > 0.99f && r[150] < 0.01f);                       // 1.5 s: only L
+    CHECK (l[350] < 0.01f && std::abs (r[350] - 0.3f) < 0.02f);    // 3.5 s: only R
+    CHECK (both[150] > 0.99f && std::abs (both[350] - 0.3f) < 0.02f);
+
+    auto dir = tempDir ("stpeaks");
+    CHECK (p.save (dir.getChildFile ("s.pk")));
+    PeakStore q;
+    CHECK (q.load (dir.getChildFile ("s.pk")) && q.numChannels() == 2);
+    q.render (0, fpp, 500, r.data(), 1);
+    CHECK (std::abs (r[350] - 0.3f) < 0.02f);
+
+    // A stereo WAV whose cache was written by 0.3 (mono "OMRPK1") gets rebuilt with L/R.
+    auto wav = dir.getChildFile ("T01_st_001.wav");
+    { BwfWriter w; BwfInfo info; info.numChannels = 2; CHECK (w.open (wav, info)); w.appendFrames (x.data(), (size_t) n); w.close(); }
+    {
+        PeakStore mono; mono.append (x.data(), (size_t) n, 1); mono.finish();
+        auto cf = WaveformCache::cacheFileFor (wav);
+        cf.getParentDirectory().createDirectory();
+        juce::FileOutputStream os (cf);
+        os.write ("OMRPK1", 6); os.writeInt64 ((juce::int64) n); for (int k = 0; k < 3; ++k) os.writeInt (0);
+    }
+    WaveformCache cache;
+    auto s = cache.get (wav);
+    for (int i = 0; i < 300 && ! (s->isComplete() && s->numChannels() == 2); ++i) juce::Thread::sleep (10);
+    CHECK (s->numChannels() == 2 && s->frames() == (uint64_t) n);
+}
+
+static void testRemote()
+{
+    SECTION ("Remote: OSC address map, MMC, MIDI learn");
+    using namespace omr::remote;
+    juce::Array<juce::var> none;
+    CHECK (parseOsc ("/livedeck/record", none).action == Action::record);
+    CHECK (parseOsc ("/LiveDeck/Stop/", none).action == Action::stop);
+    CHECK (parseOsc ("/livedeck/playstop", none).action == Action::playStop);
+    CHECK (parseOsc ("/livedeck/rtz", none).action == Action::rtz);
+    CHECK (parseOsc ("/other/record", none).action == Action::none);
+    auto m = parseOsc ("/livedeck/marker", { juce::var ("Song 2") });
+    CHECK (m.action == Action::marker && m.text == "Song 2");
+    CHECK (parseOsc ("/livedeck/locate", { juce::var (90.5) }).seconds == 90.5);
+    CHECK (std::abs (parseOsc ("/livedeck/locate", { juce::var ("1:02:03") }).seconds - 3723.0) < 1e-9);
+    CHECK (parseOsc ("/livedeck/locate", { juce::var ("bogus") }).action == Action::none);
+    auto t = parseOsc ("/livedeck/take", { juce::var (3) });
+    CHECK (t.action == Action::selectTake && t.value == 3);
+    CHECK (parseOsc ("/livedeck/take/next", none).action == Action::nextTake);
+    auto a = parseOsc ("/livedeck/track/12/arm", { juce::var (0) });
+    CHECK (a.action == Action::armTrack && a.track == 11 && a.value == 0);
+    auto mu = parseOsc ("/livedeck/track/2/mute", none);
+    CHECK (mu.action == Action::muteTrack && mu.value == -1);         // no argument = toggle
+    CHECK (parseOsc ("/livedeck/track/2/solo", { juce::var (1.0f) }).value == 1);
+    CHECK (parseOsc ("/livedeck/track/0/arm", none).action == Action::none);
+    CHECK (parseOsc ("/livedeck/arm/all", { juce::var (0) }).value == 0);
+
+    const uint8_t play[] = { 0xF0, 0x7F, 0x7F, 0x06, 0x02, 0xF7 };
+    const uint8_t rec[]  = { 0xF0, 0x7F, 0x05, 0x06, 0x06, 0xF7 };
+    const uint8_t loc[]  = { 0xF0, 0x7F, 0x7F, 0x06, 0x44, 0x06, 0x01, 0x21, 0x02, 0x03, 0x0C, 0x00, 0xF7 }; // 25 fps 01:02:03:12
+    CHECK (parseMmc (play, 6).action == Action::play);
+    CHECK (parseMmc (rec, 6, 5).action == Action::record && parseMmc (rec, 6, 9).action == Action::none);
+    auto l = parseMmc (loc, 13);
+    CHECK (l.action == Action::locate && std::abs (l.seconds - (3723.0 + 12.0 / 25.0)) < 1e-6);
+
+    auto b = Binding::learnFrom (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), Action::record);
+    CHECK (b.kind == Binding::Kind::note && b.matches (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 1)));
+    CHECK (! b.matches (juce::MidiMessage::noteOn (2, 60, (juce::uint8) 100)) && ! b.matches (juce::MidiMessage::noteOff (1, 60)));
+    auto cc = Binding::learnFrom (juce::MidiMessage::controllerEvent (3, 20, 127), Action::stop);
+    CHECK (cc.matches (juce::MidiMessage::controllerEvent (3, 20, 100)) && ! cc.matches (juce::MidiMessage::controllerEvent (3, 20, 10)));
+    auto rt = Binding::fromVar (cc.toVar());
+    CHECK (rt.kind == cc.kind && rt.number == 20 && rt.channel == 3 && rt.action == Action::stop);
+}
+
+static void testMultiDevice()
+{
+    SECTION ("Several devices: per-device processing, own clocks, stereo pairs never span devices, playback on the output's device");
+    // Device A: 4 in / 4 out (globals in 0-3, out 0-3). Device B: 6 in / 2 out (globals in 4-9, out 4-5).
+    PatchState p;
+    juce::StringArray ins, outs;
+    for (int i = 0; i < 4; ++i) { ins.add ("A " + juce::String (i + 1)); outs.add ("A out " + juce::String (i + 1)); }
+    for (int i = 0; i < 6; ++i) ins.add ("B " + juce::String (i + 1));
+    for (int i = 0; i < 2; ++i) outs.add ("B out " + juce::String (i + 1));
+    setDeviceChannels (p, ins, outs);
+    p.devices = { { "A", 4, 4 }, { "B", 6, 2 } };
+    p.mirror = false;
+    addTracks (p, 3, 0, false, false);
+    setTrackInput (p, 0, 1, false);             // A in 2
+    setTrackOutput (p, 0, 0);                   // -> A out 1
+    setTrackInput (p, 1, 6, false, true);       // B in 3-4 stereo
+    setTrackOutput (p, 1, 4, true);             // -> B out 1-2
+    setTrackInput (p, 2, 3, false, true);       // "A in 4 + B in 1": pair spans devices
+    setTrackOutput (p, 2, 5);                   // -> B out 2: cross-device direct out
+
+    auto snap = compileSnapshot (p, 1);
+    CHECK (snap->tracks[0].inDev == 0 && snap->tracks[0].input == 1 && snap->tracks[0].outDev == 0 && snap->tracks[0].outs[0] == 0);
+    CHECK (snap->tracks[1].inDev == 1 && snap->tracks[1].input == 2 && snap->tracks[1].input2 == 3);
+    CHECK (snap->tracks[1].outDev == 1 && snap->tracks[1].outs[0] == 0 && snap->tracks[1].outStereo == 1);
+    CHECK (snap->tracks[2].inDev == 0 && snap->tracks[2].input == 3 && snap->tracks[2].input2 == -1);   // never spans devices
+    CHECK (snap->crossDeviceOuts == 1);
+
+    auto root = tempDir ("multidev");
+    RecordEngine e;
+    e.deviceStarting (0, 48000.0, 256);
+    e.deviceStarting (1, 48000.0, 256);
+    p.tracks[2].armed = false;
+    e.setPatch (p);
+    SessionSettings s; s.primaryRoot = root; s.minFreeHours = 0.01;
+    CHECK (e.startRecording (s, p).wasOk());
+
+    // Device signals: A channel c -> sig(c, f); B channel c -> sig(100 + c, f). B delivers 3 extra blocks (its clock runs fast).
+    auto runDevice = [&] (int d, int numIn, int numOut, int blocks, uint64_t& frame, std::vector<std::vector<float>>* outCapture)
+    {
+        std::vector<std::vector<float>> in ((size_t) numIn, std::vector<float> (256)), out ((size_t) numOut, std::vector<float> (256));
+        std::vector<const float*> ip; std::vector<float*> op;
+        for (auto& v : in) ip.push_back (v.data());
+        for (auto& v : out) op.push_back (v.data());
+        for (int b = 0; b < blocks; ++b)
+        {
+            for (int c = 0; c < numIn; ++c)
+                for (int i = 0; i < 256; ++i) in[(size_t) c][(size_t) i] = sig ((d == 0 ? 0 : 100) + c, frame + (uint64_t) i);
+            e.process (d, ip.data(), numIn, op.data(), numOut, 256);
+            frame += 256;
+        }
+        if (outCapture != nullptr) *outCapture = out;
+    };
+    uint64_t fa = 0, fb = 0;
+    std::vector<std::vector<float>> outA, outB;
+    runDevice (0, 4, 4, 200, fa, &outA);
+    runDevice (1, 6, 2, 203, fb, &outB);
+    // live direct out on the same device works; the cross-device one stays silent
+    bool liveOk = true;
+    for (int i = 0; i < 256; ++i) liveOk &= std::abs (outA[0][(size_t) i] - sig (1, fa - 256 + (uint64_t) i)) < 1e-6f;
+    CHECK (liveOk);
+    bool crossSilent = true;
+    for (int i = 0; i < 256; ++i) crossSilent &= outB[1][(size_t) i] == 0.0f || std::abs (outB[1][(size_t) i] - sig (103, fb - 256 + (uint64_t) i)) < 1e-6f;
+    CHECK (crossSilent);
+    e.stopRecording();
+
+    auto f0 = openWav (SessionPaths::audioDir (root).getChildFile (SessionPaths::trackFileName (0, p.tracks[0].name, 1, false)));
+    auto f1 = openWav (SessionPaths::audioDir (root).getChildFile (SessionPaths::trackFileName (1, p.tracks[1].name, 1, false)));
+    CHECK (f0 != nullptr && f1 != nullptr);
+    if (f0 == nullptr || f1 == nullptr) return;
+    CHECK ((uint64_t) f0->lengthInSamples == 256 * 200);                  // each track runs on its own device's clock
+    CHECK ((uint64_t) f1->lengthInSamples == 256 * 203 && f1->numChannels == 2);
+    juce::AudioBuffer<float> b1 (2, (int) f1->lengthInSamples);
+    f1->read (&b1, 0, (int) f1->lengthInSamples, 0, true, true);
+    float err = 0;
+    for (int i = 0; i < b1.getNumSamples(); i += 37)
+        err = std::max ({ err, std::abs (b1.getSample (0, i) - sig (102, (uint64_t) i)), std::abs (b1.getSample (1, i) - sig (103, (uint64_t) i)) });
+    CHECK (err < 2.0f / 8388607.0f);
+
+    // Playback: track 2 (stereo) must come out of device B's outputs 1-2, rendered by B's callback.
+    CHECK (e.startPlayback (resolveTakeFiles (root, 1, p), 1, 500).wasOk());
+    std::vector<std::vector<float>> silentA, playB;
+    uint64_t pa = 0, pb = 0;
+    runDevice (0, 4, 4, 1, pa, &silentA);
+    runDevice (1, 6, 2, 1, pb, &playB);
+    float perr = 0;
+    for (int i = 0; i < 256; ++i)
+        perr = std::max ({ perr, std::abs (playB[0][(size_t) i] - sig (102, 500 + (uint64_t) i)), std::abs (playB[1][(size_t) i] - sig (103, 500 + (uint64_t) i)) });
+    CHECK (perr < 1e-6f);
+    bool aQuiet = true;
+    for (int c = 1; c < 4; ++c) for (float v : silentA[(size_t) c]) aQuiet &= v == 0.0f;
+    CHECK (aQuiet);                                                        // B's track never leaks into A
+    e.stopPlayback();
 }
 
 static void testFailedTarget()
@@ -608,7 +816,7 @@ static void testFailedTarget()
     RecordEngine e;
     e.deviceStarting (48000.0, 256);
     PatchState p;
-    setDeviceChannels (p, { "a", "b" }, {});
+    setupTracks (p, { "a", "b" }, {});
     e.setPatch (p);
     SessionSettings s;
     s.primaryRoot = juce::File ("/proc/omr_cannot_write_here");
@@ -631,7 +839,7 @@ static void testSession()
     auto root = tempDir ("session");
     SessionSettings s; PatchState p;
     s.name = "Arena Show"; s.primaryRoot = root; s.nextTake = 4;
-    setDeviceChannels (p, { "1", "2", "3" }, { "1", "2" });
+    setupTracks (p, { "1", "2", "3" }, { "1", "2" });
     auto file = SessionPaths::sessionFile (root, s.name);
     CHECK (file.getFileName() == "Arena_Show.livedeck");
     CHECK (saveSession (file, s, p).wasOk());
@@ -691,9 +899,12 @@ int main (int argc, char** argv)
     testOverrun();
     testPlayback();
     testPeaks();
+    testStereoPeaks();
     testStereo();
     testUpdater();
     testTrackEditing();
+    testRemote();
+    testMultiDevice();
     testFailedTarget();
     testBenchmark();
     if (big) testRF64();

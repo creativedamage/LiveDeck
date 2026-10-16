@@ -14,7 +14,7 @@ TransportBar::TransportBar()
     takeCombo.setTooltip ("Take to play back");
     takeCombo.setTextWhenNothingSelected ("No takes");
     markButton.setTooltip ("Drop a marker at the current position");
-    mirrorToggle.setTooltip ("Track n records input n and plays to output n. Editing any strip turns this off and keeps the mapping.");
+    mirrorToggle.setTooltip ("Each track's output follows its input (in 7 -> out 7, in 3-4 ST -> out 3-4 ST). Never creates or removes tracks. Patching an output by hand turns this off.");
     monitorLeft.setTooltip ("Monitor bus left output");
     monitorRight.setTooltip ("Monitor bus right output");
 
@@ -93,8 +93,22 @@ void TransportBar::paint (juce::Graphics& g)
     const bool audioOk = ! status.noAudio && status.device != "No audio device";
     drawChip (g, row, "DRIVER", status.noAudio ? "NO AUDIO FROM DRIVER" : status.device, audioOk ? Theme::green : Theme::red, 300);
     drawChip (g, row, "CPU", juce::String (juce::roundToInt (status.cpu * 100.0)) + " %", status.cpu > 0.7 ? Theme::red : (status.cpu > 0.5 ? Theme::yellow : Theme::green), 64);
-    drawChip (g, row, "CLOCK", status.clockKnown ? (status.ppm >= 0 ? "+" : "") + juce::String (juce::roundToInt (status.ppm)) + " ppm" : juce::String ("measuring"),
-              ! status.clockKnown ? Theme::textDim : (std::abs (status.ppm) > 100.0 ? Theme::yellow : Theme::green), 92);
+    if (status.devices > 1)
+    {
+        // several devices: what matters is whether they agree (common word clock -> ~0 ppm)
+        const auto v = status.driftKnown ? juce::String::charToString (0x0394) + " " + juce::String (juce::roundToInt (std::abs (status.worstDrift))) + " ppm"
+                                         : juce::String ("measuring");
+        drawChip (g, row, "CLOCK  " + juce::String (status.devices) + " DEVICES", v,
+                  ! status.driftKnown ? Theme::textDim : (std::abs (status.worstDrift) > 5.0 ? Theme::yellow : Theme::green), 112);
+    }
+    else
+    {
+        const bool unstable = status.clockKnown && std::abs (status.ppm) > 5000.0;
+        drawChip (g, row, "CLOCK", ! status.clockKnown ? juce::String ("measuring")
+                                   : unstable ? juce::String ("unstable")
+                                              : (status.ppm >= 0 ? "+" : "") + juce::String (juce::roundToInt (status.ppm)) + " ppm",
+                  ! status.clockKnown ? Theme::textDim : (unstable || std::abs (status.ppm) > 100.0 ? Theme::yellow : Theme::green), 92);
+    }
     drawChip (g, row, "DROPOUTS", juce::String (status.dropouts), status.dropouts > 0 ? Theme::yellow : Theme::green, 74);
 
     for (auto* d : { &status.diskA, &status.diskB })

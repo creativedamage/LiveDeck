@@ -2,7 +2,7 @@
 
 A multitrack recorder and virtual-soundcheck player for live events, built for macOS (it also builds on Windows). It records SoundGrid, Dante, MADI and USB interfaces to Broadcast WAV files. It can write to two disks at once, shows a Tracks Live-style timeline, and plays takes back out to the console.
 
-**Version 0.3.** The record and playback engine is covered by 167 automated checks. It has been built on Linux with GCC and Clang and on your Mac, but **not tested yet with SoundGrid, Dante or MADI hardware.** Do that before a show.
+**Version 0.4.** The record and playback engine is covered by 167 automated checks. It has been built on Linux with GCC and Clang and on your Mac, but **not tested yet with SoundGrid, Dante or MADI hardware.** Do that before a show.
 
 ## Install on your Mac
 
@@ -13,7 +13,7 @@ cd ~/Documents/LiveDeck
 ./scripts/build-mac-app.sh --install
 ```
 
-This builds a universal app (Apple Silicon and Intel), runs the tests, signs the app, makes `dist/LiveDeck-0.3.0.dmg`, and copies **LiveDeck.app** into Applications. Open it from Launchpad or Spotlight like any other Mac app. Double-clicking a `.livedeck` session file also opens it in LiveDeck.
+This builds a universal app (Apple Silicon and Intel), runs the tests, signs the app, makes `dist/LiveDeck-0.4.0.dmg`, and copies **LiveDeck.app** into Applications. Open it from Launchpad or Spotlight like any other Mac app. Double-clicking a `.livedeck` session file also opens it in LiveDeck.
 
 Options:
 
@@ -29,7 +29,9 @@ For development, `cmake -S . -B build-xcode -G Xcode` makes an Xcode project.
 | Pick the driver, sample rate and buffer size | **Audio Setup** (Cmd+,). SoundGrid, Dante Virtual Soundcard, MADI and USB interfaces appear as CoreAudio devices. |
 | Make a track mono or stereo | In a channel strip's **Input** menu, pick a channel under **Mono** or a pair under **Stereo** (1-2 ST, 3-4 ST…). That choice sets the track width. Stereo tracks record one interleaved stereo BWF file, which Pro Tools, Logic and Reaper all import. |
 | Choose outputs | The **Output** menu has the same Mono / Stereo sections. A mono track sent to a stereo pair plays on both sides. A stereo track sent to a mono output is summed. |
-| Quick patch | **Mirror Input to Output (1:1)** maps track *n* to input *n* and output *n*, all mono. Editing any strip turns it off and keeps the mapping. |
+| Add tracks | **+ Track** adds one track on the next unused input. **Tracks > Add Multiple Tracks…** adds many at once (count, starting input, mono or stereo pairs). Tracks are never created automatically. |
+| Mirror outputs | **Mirror Input to Output** makes each track's output follow its input (in 7 → out 7, in 3-4 ST → out 3-4 ST). It never creates or removes tracks. Patching an output by hand turns it off. |
+| Choose channels | Untick channels you don't use in **Audio Setup**. They stay off and are left out of the track menus. A track patched to a channel that disappears keeps its patch, shows "(off)", and records silence until the channel returns. |
 | Start a session | **File > New Session** (Cmd+N) asks for a name and a location, then creates `YYYY-MM-DD_<Name>/` with `Audio/`, `Recovery/`, `Logs/` and `Markers/` folders inside. Opening a session or template always asks where to record. |
 | Record | **REC** (Cmd+R) starts a new take. Inputs and arm states are locked while recording. Waveforms draw live as audio comes in. **STOP** (Cmd+.) finalises the take. |
 | Play back for virtual soundcheck | Pick a take, then press **PLAY** or Space. Each recorded track plays to its own outputs in place of its live input. |
@@ -38,6 +40,8 @@ For development, `cmake -S . -B build-xcode -G Xcode` makes an Xcode project.
 | Delete tracks | Right-click > **Delete Track(s)**, Delete/Backspace, or **- Track**. You're asked to confirm. Recorded audio files are always kept. |
 | Rename tracks | Double-click a name (timeline or mixer). **Tab** saves and moves to the next track, Shift+Tab goes to the previous one, Return saves, Esc cancels. |
 | Reorder tracks | Drag a track header up or down on the timeline, or a strip sideways in the mixer. A multi-selection moves as one block. Recorded takes follow their tracks: each take saves a small manifest (`Audio/.take_NNN.json`) that matches files to tracks. |
+| Several interfaces | **View > Additional Audio Devices…** opens more devices next to the primary one (for example Dante and MADI), at the same sample rate and buffer size. Their channels are listed after the primary's as "Device: channel". Each device keeps its own clock: its tracks are recorded bit-exact at that clock and never resampled. The CLOCK chip shows the drift between devices; clock all devices from one word clock / PTP source to keep them sample-locked. Direct outs must be on the same device as the track's input. |
+| Remote control | **Transport > Remote Control…** turns on OSC (default UDP port 9010) and optional feedback (default 127.0.0.1:9011). The OSC commands and feedback messages are listed in that window. MIDI: pick an input, use MMC (Play / Stop / Record / Locate), or **Learn** a note/CC for each transport button. Record over OSC/MIDI needs an open session, and play/stop never stops a recording. |
 | Markers | **M** or the **MARK** button. Markers show as flags on the ruler and are saved in `Markers/markers.csv`. |
 | Record to two disks | **Disks > Set Redundant Folder (Disk B)**. Each disk has its own buffer and writer thread. |
 | Check a disk | **Disks > Benchmark Disks** runs the real write pattern for 15 s and reports PASS or FAIL. |
@@ -99,9 +103,8 @@ Tests/           LiveDeckTests (run with --big to include the 4 GB RF64 test)
 
 ## Not built yet
 
-- Several drivers at once (for example, Dante and MADI together). For now, use a macOS aggregate device.
-- OSC control (Bitfocus Companion) and MIDI/MMC.
-- Separate L/R waveform lanes for stereo tracks. Today a stereo track draws the louder of L and R.
+- Sending live audio from one device's input to another device's output (needs a resampler). Playback and recording across devices work.
+- OSC feedback goes to one target. For several controllers, point them at Companion and let Companion fan out.
 
 ## First-time setup
 

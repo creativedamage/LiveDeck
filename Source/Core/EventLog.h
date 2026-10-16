@@ -31,10 +31,12 @@ struct RtEvent
 class EventLog
 {
 public:
-    EventLog() : rt (1024) {}
+    static constexpr int kProducers = 8;   // one lock-free queue per audio device thread
+    EventLog() { for (auto& q : rt) q = std::make_unique<SpscQueue<RtEvent>> (1024); }
 
     void post (Level l, const juce::String& text);           // any non-RT thread
-    bool pushRealtime (const RtEvent& e) noexcept { return rt.push (e); } // audio thread only
+    // Audio threads only; `producer` = the device index whose callback is calling.
+    bool pushRealtime (const RtEvent& e, int producer = 0) noexcept { return rt[(size_t) juce::jlimit (0, kProducers - 1, producer)]->push (e); }
 
     // UI thread: convert pending RT events, then copy entries newer than `sinceIndex`.
     void drainRealtime (double sampleRate);
@@ -46,7 +48,7 @@ private:
     mutable std::mutex lock;
     std::vector<LogEntry> entries;
     size_t base = 0; // global index of entries[0]
-    SpscQueue<RtEvent> rt;
+    std::array<std::unique_ptr<SpscQueue<RtEvent>>, kProducers> rt;
     juce::File logFile;
 };
 } // namespace omr

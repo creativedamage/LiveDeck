@@ -39,12 +39,14 @@ public:
     bool hasTrack (int track) const noexcept { return track >= 0 && track < kMaxTracks && tracks[(size_t) track] != nullptr; }
     // Fills dstL (and dstR for stereo files); returns the file's channel count (1 or 2).
     // Underruns produce zeros and are skipped later so tracks stay aligned.
-    int readTrack (int track, float* dstL, float* dstR, int n, uint64_t posForEvents) noexcept;
-    void advance (int n) noexcept;
+    // `device` = the calling device: each device advances its own position (they may drift).
+    int readTrack (int track, float* dstL, float* dstR, int n, uint64_t posForEvents, int device = 0) noexcept;
+    void advance (int device, int n) noexcept;
+    void advance (int n) noexcept { advance (0, n); }
 
-    uint64_t position() const noexcept { return pos.load (std::memory_order_relaxed); }
+    uint64_t position (int device = 0) const noexcept { return pos[(size_t) device].load (std::memory_order_relaxed); }
     uint64_t length() const noexcept { return lengthFrames; }
-    bool finished() const noexcept { return pos.load (std::memory_order_relaxed) >= lengthFrames; }
+    bool finished() const noexcept { return position (0) >= lengthFrames; }   // the primary device is the clock
     int take() const noexcept { return takeNumber; }
     int numTracks() const noexcept { return (int) list.size(); }
     uint64_t underrunFrames() const noexcept { return underruns.load(); }
@@ -70,9 +72,10 @@ private:
     juce::AudioFormatManager formats;
     std::array<std::unique_ptr<TrackIn>, kMaxTracks> tracks {};
     std::vector<TrackIn*> list;
-    std::atomic<uint64_t> pos { 0 }, underruns { 0 };
+    std::array<std::atomic<uint64_t>, kMaxDevices> pos {};
+    std::atomic<uint64_t> underruns { 0 };
     uint64_t lengthFrames = 0;
     int takeNumber = 0;
-    bool underrunLogged = false;
+    std::atomic<bool> underrunLogged { false };
 };
 } // namespace omr
