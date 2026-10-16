@@ -26,6 +26,17 @@ namespace SessionPaths
     juce::String trackFileName (int trackIndex, const juce::String& trackName, int take, bool secondary);
 }
 
+// The user's LiveDeck library: ~/Documents/LiveDeck/Shows and ~/Documents/LiveDeck/Templates.
+// Created at first launch (macOS apps have no installer step) and re-created if deleted.
+namespace Library
+{
+    juce::File root();          // ~/Documents/LiveDeck
+    juce::File shows();         // new sessions are created here by default
+    juce::File templates();     // templates are saved and listed here
+    bool ensure();              // creates the folders (and a short read-me); true if they exist afterwards
+    juce::Array<juce::File> listTemplates();   // *.ldtemplate in templates(), by name
+}
+
 struct SessionSettings
 {
     juce::String name = "Untitled";

@@ -459,7 +459,7 @@ void TimelineView::paint (juce::Graphics& g)
         {
             g.setColour (Theme::textDim);
             g.setFont (Theme::ui (13.0f));
-            g.drawText ("No tracks yet: click + Track, or Tracks > Add Multiple Tracks...", ra, juce::Justification::centred);
+            g.drawText ("No tracks yet: click + Track, use Tracks > Add Multiple Tracks..., or drop WAV files here", ra, juce::Justification::centred);
         }
 
         // drag-and-drop insertion line
@@ -495,6 +495,90 @@ void TimelineView::paint (juce::Graphics& g)
 
     g.setColour (Theme::edge);
     g.drawHorizontalLine (getHeight() - kScrollW - 1, 0.0f, (float) getWidth());
+
+    paintDropOverlay (g);
+}
+
+// ------------------------------------------------------------------------------------ file drop
+
+static bool isAudioOrFolder (const juce::String& path)
+{
+    const juce::File f (path);
+    return f.isDirectory() || f.hasFileExtension ("wav;wave;bwf;aif;aiff;aifc");
+}
+
+bool TimelineView::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& f : files) if (isAudioOrFolder (f)) return true;
+    return false;
+}
+
+uint64_t TimelineView::dropFrameForX (int x) const
+{
+    // Within 12 px of the start (or over the track headers) snaps to zero, keeping the take aligned.
+    if (x < kHeaderW || (float) x - frameToX (0.0) < 12.0f) return 0;
+    return (uint64_t) juce::jmax (0.0, xToFrame ((float) x));
+}
+
+void TimelineView::fileDragEnter (const juce::StringArray&, int x, int) { fileHover = true; fileHoverX = x; repaint(); }
+void TimelineView::fileDragMove (const juce::StringArray&, int x, int)  { fileHoverX = x; repaint(); }
+void TimelineView::fileDragExit (const juce::StringArray&)              { fileHover = false; repaint(); }
+
+void TimelineView::filesDropped (const juce::StringArray& files, int x, int)
+{
+    fileHover = false;
+    repaint();
+    juce::StringArray audio;
+    for (const auto& f : files) if (isAudioOrFolder (f)) audio.add (f);
+    if (! audio.isEmpty() && onFilesDropped) onFilesDropped (audio, dropFrameForX (x));
+}
+
+void TimelineView::setBusyText (const juce::String& text)
+{
+    if (busyText == text) return;
+    busyText = text;
+    repaint();
+}
+
+void TimelineView::paintDropOverlay (juce::Graphics& g)
+{
+    const auto ra = rowsArea();
+    if (fileHover)
+    {
+        const bool ok = ! canAcceptDrop || canAcceptDrop();
+        const auto col = ok ? Theme::blue : Theme::red;
+        g.setColour (col.withAlpha (0.10f));
+        g.fillRect (ra);
+        g.setColour (col);
+        g.drawRect (ra, 2);
+
+        juce::String msg = "Recording: stop before importing audio";
+        if (ok)
+        {
+            const auto frame = dropFrameForX (fileHoverX);
+            const float x = frameToX ((double) frame);
+            g.fillRect (x - 1.0f, (float) ra.getY(), 2.0f, (float) ra.getHeight());
+            msg = "Drop to add as new tracks, starting at " + formatTime ((double) frame / sampleRate, 0.1);
+        }
+        g.setFont (Theme::ui (14.0f, true));
+        const auto box = ra.withSizeKeepingCentre (juce::jmin (ra.getWidth() - 20, 460), 40);
+        g.setColour (Theme::panel.withAlpha (0.92f));
+        g.fillRoundedRectangle (box.toFloat(), 8.0f);
+        g.setColour (Theme::text);
+        g.drawText (msg, box, juce::Justification::centred);
+    }
+    else if (busyText.isNotEmpty())
+    {
+        const auto box = juce::Rectangle<int> (0, 0, juce::jmin (ra.getWidth() - 20, 520), 34)
+                             .withCentre ({ ra.getCentreX(), ra.getY() + 30 });
+        g.setColour (Theme::panel.withAlpha (0.95f));
+        g.fillRoundedRectangle (box.toFloat(), 8.0f);
+        g.setColour (Theme::blue);
+        g.drawRoundedRectangle (box.toFloat().reduced (0.5f), 8.0f, 1.0f);
+        g.setColour (Theme::text);
+        g.setFont (Theme::ui (13.0f));
+        g.drawText (busyText, box.reduced (12, 0), juce::Justification::centred, true);
+    }
 }
 
 // ------------------------------------------------------------------------------------ mouse

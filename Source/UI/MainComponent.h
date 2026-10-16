@@ -126,6 +126,19 @@ private:
     juce::Component stripDropMarker;
     int stripDropIndex = -1;
 
+    // library folders, templates, feedback
+    void revealLibrary();
+    void addTemplateItems (juce::PopupMenu& m, bool enabled);
+    void showFeedback (int kind);
+    juce::String systemInfo() const;
+
+    // drag-and-drop audio import (new tracks in the shown take)
+    void importAudioFiles (const juce::StringArray& paths, uint64_t startFrame);
+    struct ImportJob;
+    void finishImport (std::shared_ptr<ImportJob> job);
+    std::shared_ptr<std::atomic<bool>> importCancel;
+    bool importRunning = false;
+
     void showUpdateOffer (const struct UpdateOffer& offer);
     void installUpdate (std::shared_ptr<struct UpdateOffer> offer);
     std::atomic<bool> updateBusy { false }, updateCancel { false };

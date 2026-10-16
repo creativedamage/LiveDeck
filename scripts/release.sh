@@ -44,6 +44,13 @@ git tag -a "v$V" -m "LiveDeck $V"
 git push origin "$BRANCH"
 git push origin "v$V"
 
+# Labels used by Help > Request a Feature / Report a Bug / Send Feedback (harmless if they exist).
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+  gh label create enhancement --color a2eeef --description "Feature request" >/dev/null 2>&1 || true
+  gh label create bug --color d73a4a --description "Something isn't working" >/dev/null 2>&1 || true
+  gh label create feedback --color c5def5 --description "Feedback sent from LiveDeck" >/dev/null 2>&1 || true
+fi
+
 REPO=$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
 echo
 echo "Tagged v$V. GitHub is building the release now (about 20 minutes):"

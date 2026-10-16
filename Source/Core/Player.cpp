@@ -85,6 +85,42 @@ bool writeManifestIfMissing (const juce::File& root, int take, const PatchState&
     return manifest.replaceWithText (juce::JSON::toString (juce::var (m.get())), false, false, "\n");
 }
 
+bool appendToManifest (const juce::File& root, int take, const std::vector<ManifestEntry>& add)
+{
+    const auto manifest = SessionPaths::takeManifest (root, take);
+    juce::Array<juce::var> entries;
+    if (manifest.existsAsFile())
+        if (auto* existing = juce::JSON::parse (manifest).getProperty ("tracks", {}).getArray())
+            entries = *existing;
+    for (const auto& a : add)
+    {
+        juce::DynamicObject::Ptr e = new juce::DynamicObject();
+        e->setProperty ("id", a.id);
+        e->setProperty ("row", a.row);
+        e->setProperty ("name", a.name);
+        e->setProperty ("channels", a.channels);
+        e->setProperty ("file", a.file.getFileName());
+        e->setProperty ("imported", true);
+        entries.add (juce::var (e.get()));
+    }
+    juce::DynamicObject::Ptr m = new juce::DynamicObject();
+    m->setProperty ("take", take);
+    m->setProperty ("tracks", entries);
+    SessionPaths::audioDir (root).createDirectory();
+    return manifest.replaceWithText (juce::JSON::toString (juce::var (m.get())), false, false, "\n");
+}
+
+uint64_t takeLength (const std::map<int, juce::File>& files)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    uint64_t len = 0;
+    for (const auto& [index, file] : files)
+        if (std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (file)); r != nullptr)
+            len = std::max (len, (uint64_t) r->lengthInSamples);
+    return len;
+}
+
 juce::Result Player::load (const juce::File& root, int take, double sr, uint64_t startFrame)
 {
     const auto takes = scanTakes (root);

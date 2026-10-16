@@ -43,7 +43,9 @@ set(OMR_CORE_SOURCES
     Source/Core/Player.cpp
     Source/Core/PeakStore.cpp
     Source/Core/Updater.cpp
-    Source/Core/Remote.cpp)
+    Source/Core/Remote.cpp
+    Source/Core/AudioImport.cpp
+    Source/Core/Feedback.cpp)
 
 # ---------------------------------------------------------------------------
 # GitHub repository used for in-app updates ("owner/repo"). Taken from
@@ -86,6 +88,7 @@ target_sources(LiveDeck PRIVATE
     Source/UI/ChannelStrip.cpp
     Source/UI/TimelineView.cpp
     Source/UI/RemoteControl.cpp
+    Source/UI/FeedbackDialog.cpp
     Source/UI/TransportBar.cpp
     Source/UI/MainComponent.cpp
     Source/Main.cpp)

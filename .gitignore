@@ -3,3 +3,7 @@ build-*/
 dist/
 .DS_Store
 *.xcodeproj/
+# LiveDeck library folders (the app creates them in ~/Documents/LiveDeck)
+Shows/
+Templates/
+About this folder.txt

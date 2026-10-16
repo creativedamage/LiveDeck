@@ -23,6 +23,13 @@ std::map<int, juce::File> resolveTakeFiles (const juce::File& sessionRoot, int t
 // so the tracks keep their audio through later reorders. Returns true if a manifest was written.
 bool writeManifestIfMissing (const juce::File& sessionRoot, int take, const PatchState& patch);
 
+// Adds files to a take's manifest (creating it if needed). Used by audio import.
+struct ManifestEntry { int id = 0, row = 0, channels = 1; juce::String name; juce::File file; };
+bool appendToManifest (const juce::File& sessionRoot, int take, const std::vector<ManifestEntry>& entries);
+
+// Length of a take in frames: the longest of its files.
+uint64_t takeLength (const std::map<int, juce::File>& files);
+
 class Player : private juce::Thread
 {
 public:

@@ -46,6 +46,35 @@ namespace SessionPaths
     }
 }
 
+namespace Library
+{
+    juce::File root()      { return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("LiveDeck"); }
+    juce::File shows()     { return root().getChildFile ("Shows"); }
+    juce::File templates() { return root().getChildFile ("Templates"); }
+
+    bool ensure()
+    {
+        const bool ok = shows().createDirectory() && templates().createDirectory();
+        const auto readme = root().getChildFile ("About this folder.txt");
+        if (ok && ! readme.exists())
+            readme.replaceWithText ("LiveDeck library\n"
+                                    "\n"
+                                    "Shows       New sessions are created here (one folder per show: audio, markers, logs).\n"
+                                    "Templates   Track layouts saved with File > Save as Template. They appear under File > New from Template.\n"
+                                    "\n"
+                                    "You can record anywhere else too (File > New Session > Choose Folder...), for example on an external SSD.\n",
+                                    false, false, "\n");
+        return shows().isDirectory() && templates().isDirectory();
+    }
+
+    juce::Array<juce::File> listTemplates()
+    {
+        auto files = templates().findChildFiles (juce::File::findFiles, false, "*.ldtemplate");
+        files.sort();
+        return files;
+    }
+}
+
 juce::var sessionToVar (const SessionSettings& s, const PatchState& p)
 {
     juce::DynamicObject::Ptr o = new juce::DynamicObject();

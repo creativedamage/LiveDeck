@@ -11,7 +11,7 @@
 #include "Theme.h"
 #include <set>
 
-class TimelineView final : public juce::Component, private juce::ScrollBar::Listener
+class TimelineView final : public juce::Component, public juce::FileDragAndDropTarget, private juce::ScrollBar::Listener
 {
 public:
     struct Marker { uint64_t frame = 0; juce::String label; };
@@ -41,6 +41,17 @@ public:
     std::function<void (int row)> onTrackMenu;                    // right-click on a track header
     std::function<void (int insertBefore)> onMoveSelected;        // header drag-and-drop finished
     std::function<void (int row, const juce::String&)> onRename;
+    // Audio files / folders dropped on the timeline; `frame` = where they should start (0 near the left edge).
+    std::function<void (const juce::StringArray& files, uint64_t frame)> onFilesDropped;
+    std::function<bool()> canAcceptDrop;                 // false while recording
+    void setBusyText (const juce::String& text);         // "Importing 3 of 12..." overlay; empty hides it
+
+    // ---- juce::FileDragAndDropTarget
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void fileDragEnter (const juce::StringArray&, int x, int y) override;
+    void fileDragMove (const juce::StringArray&, int x, int y) override;
+    void fileDragExit (const juce::StringArray&) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
 
     // ---- juce::Component
     void paint (juce::Graphics&) override;
@@ -104,6 +115,13 @@ private:
     int pressRow = -1, pressY = 0, dropIndex = -1;
     bool reorderArmed = false, reordering = false;
     int dropIndexForY (int y) const;
+
+    // file drop
+    bool fileHover = false;
+    int fileHoverX = 0;
+    juce::String busyText;
+    uint64_t dropFrameForX (int x) const;
+    void paintDropOverlay (juce::Graphics&);
 
     // inline rename
     struct RenameEditor final : public juce::TextEditor

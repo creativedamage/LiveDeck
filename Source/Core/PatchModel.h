@@ -69,6 +69,9 @@ juce::Result addTrack (PatchState&, bool recording);
 // Adds `count` tracks on consecutive active inputs from `firstInput` (pairs when stereo).
 juce::Result addTracks (PatchState&, int count, int firstInput, bool stereo, bool recording);
 int firstUnusedInput (const PatchState&, bool stereo);
+// Adds a named track (imported audio) on the first free input (pair), or unpatched if none is free.
+// Imported tracks start disarmed so the next take doesn't record over an empty input.
+juce::Result addNamedTrack (PatchState&, const juce::String& name, bool stereo, bool recording, int* newId = nullptr);
 juce::Result removeLastTrack (PatchState&, bool recording);
 // Deletes the given rows (any order). Recorded audio is never touched.
 juce::Result deleteTracks (PatchState&, std::vector<int> rows, bool recording);

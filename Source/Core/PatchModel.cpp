@@ -224,6 +224,21 @@ juce::Result addTracks (PatchState& s, int count, int firstInput, bool stereo, b
     return juce::Result::ok();
 }
 
+juce::Result addNamedTrack (PatchState& s, const juce::String& name, bool stereo, bool recording, int* newId)
+{
+    if (recording) return juce::Result::fail ("Tracks cannot be added while recording");
+    if ((int) s.tracks.size() >= kMaxTracks) return juce::Result::fail ("Track limit reached");
+    auto t = makeTrack (s, firstUnusedInput (s, stereo), stereo);
+    t.name = name.trim().isNotEmpty() ? name.trim().substring (0, 64) : t.name;
+    t.autoName = false;
+    t.armed = false;
+    s.tracks.push_back (t);
+    ensureTrackIds (s);
+    if (s.mirror) applyMirror (s);
+    if (newId != nullptr) *newId = s.tracks.back().id;
+    return juce::Result::ok();
+}
+
 juce::Result removeLastTrack (PatchState& s, bool recording)
 {
     if (recording) return juce::Result::fail ("Tracks cannot be removed while recording");

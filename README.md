@@ -32,7 +32,9 @@ For development, `cmake -S . -B build-xcode -G Xcode` makes an Xcode project.
 | Add tracks | **+ Track** adds one track on the next unused input. **Tracks > Add Multiple Tracks…** adds many at once (count, starting input, mono or stereo pairs). Tracks are never created automatically. |
 | Mirror outputs | **Mirror Input to Output** makes each track's output follow its input (in 7 → out 7, in 3-4 ST → out 3-4 ST). It never creates or removes tracks. Patching an output by hand turns it off. |
 | Choose channels | Untick channels you don't use in **Audio Setup**. They stay off and are left out of the track menus. A track patched to a channel that disappears keeps its patch, shows "(off)", and records silence until the channel returns. |
-| Start a session | **File > New Session** (Cmd+N) asks for a name and a location, then creates `YYYY-MM-DD_<Name>/` with `Audio/`, `Recovery/`, `Logs/` and `Markers/` folders inside. Opening a session or template always asks where to record. |
+| Start a session | **File > New Session** (Cmd+N) asks for a name. **Create** makes `Documents/LiveDeck/Shows/YYYY-MM-DD_<Name>/` (with `Audio/`, `Recovery/`, `Logs/` and `Markers/` inside); **Choose Folder…** puts it anywhere else, such as an external SSD. Opening a session or template always asks where to record. |
+| Templates | **File > Save as Template…** saves the track layout into `Documents/LiveDeck/Templates`. **File > New from Template** lists them. LiveDeck creates the `Documents/LiveDeck` folder (Shows + Templates) the first time it starts. |
+| Import audio | Drag WAV, BWF or AIFF files (or a folder of them) from Finder onto the timeline. Each file becomes a new track in the take on screen (or a new take if there is none), starting where you drop it; dropping near the left edge starts at 0:00. Stereo files make stereo tracks, multichannel files make one track per channel. Files are converted to the session's format and sample rate; the originals are not changed. Imported tracks start disarmed. |
 | Record | **REC** (Cmd+R) starts a new take. Inputs and arm states are locked while recording. Waveforms draw live as audio comes in. **STOP** (Cmd+.) finalises the take. |
 | Play back for virtual soundcheck | Pick a take, then press **PLAY** or Space. Each recorded track plays to its own outputs in place of its live input. |
 | Move around the timeline | Click or drag anywhere in the timeline to move the playhead. Cmd+scroll zooms, and Cmd+0 zooms to fit. **Follow** keeps the playhead in view. S / M / L set the row height. Right-click a track header to change its colour. Return goes back to zero. |
@@ -47,6 +49,7 @@ For development, `cmake -S . -B build-xcode -G Xcode` makes an Xcode project.
 | Check a disk | **Disks > Benchmark Disks** runs the real write pattern for 15 s and reports PASS or FAIL. |
 | Change the layout | The **View** menu shows or hides the mixer, meter bridge and event console. Drag the bar between the timeline and the mixer to resize them. |
 | Recover after a crash | When you open a session that wasn't stopped cleanly, LiveDeck offers to repair its files. Everything that reached the disk is kept. |
+| Feedback | **Help > Request a Feature / Report a Bug / Send Feedback** opens a filled-in GitHub issue in your browser (a free GitHub account is needed to submit it). **Help > Feature Requests and Known Issues** shows what's already been asked. |
 | Start without dialogs | `/Applications/LiveDeck.app/Contents/MacOS/LiveDeck --session /Volumes/SSD/MyShow` |
 
 Space never stops a recording. Only STOP or Cmd+. ends a take.

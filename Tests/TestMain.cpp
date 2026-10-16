@@ -12,6 +12,9 @@
 #include "Core/PeakStore.h"
 #include "Core/Updater.h"
 #include "Core/Remote.h"
+#include "Core/AudioImport.h"
+#include "Core/Feedback.h"
+#include "Core/Player.h"
 
 #include <set>
 using namespace omr;
@@ -885,6 +888,178 @@ static void testRF64()
     f.deleteFile();
 }
 
+
+static juce::File writeTestWav (const juce::File& f, double rate, int channels, int frames, const std::function<float (int ch, int i)>& fn)
+{
+    f.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> os (f.createOutputStream().release());
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (os.get(), rate, (unsigned) channels, 24, {}, 0));
+    if (w != nullptr) os.release();
+    juce::AudioBuffer<float> b (channels, frames);
+    for (int c = 0; c < channels; ++c) for (int i = 0; i < frames; ++i) b.setSample (c, i, fn (c, i));
+    if (w != nullptr) w->writeFromAudioSampleBuffer (b, 0, frames);
+    return f;
+}
+
+static void testImport()
+{
+    SECTION ("Audio import: plan, convert, offset, resample, manifest");
+    const auto dir = tempDir ("import");
+    const auto srcDir = dir.getChildFile ("src");
+    srcDir.createDirectory();
+    const auto mono = writeTestWav (srcDir.getChildFile ("Kick In.wav"), 48000, 1, 4800, [] (int, int i) { return 0.25f * std::sin ((float) i * 0.05f); });
+    const auto st = writeTestWav (srcDir.getChildFile ("Playback.wav"), 44100, 2, 44100, [] (int c, int i)
+                                  { return (c == 0 ? 0.5f : -0.5f) * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / 44100.0); });
+    const auto poly = writeTestWav (srcDir.getChildFile ("Show.wav"), 48000, 4, 2000, [] (int c, int) { return 0.1f * (float) (c + 1); });
+    srcDir.getChildFile ("notes.mp3").replaceWithText ("x");
+
+    auto plan = planImport ({ mono.getFullPathName(), st.getFullPathName(), poly.getFullPathName(), srcDir.getChildFile ("notes.mp3").getFullPathName() });
+    CHECK (plan.sources.size() == 3);
+    CHECK (plan.skipped.size() == 1);
+    CHECK (plan.numTracks() == 1 + 1 + 4);
+    CHECK (plan.sources[0].outputs[0].trackName == "Kick In");
+    CHECK (plan.sources[1].outputs[0].sourceChannels.size() == 2);
+    CHECK (plan.sources[2].outputs[3].trackName == "Show 4" && plan.sources[2].outputs[3].sourceChannels[0] == 3);
+    CHECK (planImport ({ srcDir.getFullPathName() }).numTracks() == 6);   // a dropped folder
+
+    const auto root = dir.getChildFile ("Session");
+    SessionPaths::createTree (root);
+    auto dest = [&] (const juce::String& n) { return SessionPaths::audioDir (root).getChildFile (n); };
+
+    // mono, same rate, 1000 frames of leading silence
+    {
+        auto r = importSource (plan.sources[0], { dest ("T01_Kick_In_001.wav") }, 48000, 24, 1000);
+        CHECK (r.ok);
+        auto rd = openWav (dest ("T01_Kick_In_001.wav"));
+        CHECK (rd != nullptr && rd->lengthInSamples == 5800 && rd->numChannels == 1);
+        juce::AudioBuffer<float> b (1, 5800);
+        rd->read (&b, 0, 5800, 0, true, false);
+        CHECK (std::abs (b.getSample (0, 999)) < 1.0e-6f);
+        CHECK (std::abs (b.getSample (0, 1000 + 300) - 0.25f * std::sin (300.0f * 0.05f)) < 1.0e-4f);
+    }
+    // stereo 44.1k -> 48k: right length, aligned (latency compensated), L/R kept
+    {
+        auto r = importSource (plan.sources[1], { dest ("T02_Playback_001.wav") }, 48000, 32, 0);
+        CHECK (r.ok);
+        auto rd = openWav (dest ("T02_Playback_001.wav"));
+        CHECK (rd != nullptr && std::abs ((int) rd->lengthInSamples - 48000) <= 1 && rd->numChannels == 2 && rd->sampleRate == 48000.0);
+        juce::AudioBuffer<float> b (2, 48000);
+        rd->read (&b, 0, 48000, 0, true, true);
+        float worst = 0;
+        for (int i = 2000; i < 46000; ++i)
+        {
+            const float ideal = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / 48000.0);
+            worst = juce::jmax (worst, std::abs (b.getSample (0, i) - ideal), std::abs (b.getSample (1, i) + ideal));
+        }
+        CHECK (worst < 0.01f);   // aligned to the sample (a 1-sample offset would be > 0.06)
+    }
+    // 96 kHz -> 48 kHz: aligned too (anti-alias filter + resampler)
+    {
+        const auto hi = writeTestWav (dir.getChildFile ("src/Hi.wav"), 96000, 1, 96000, [] (int, int i)
+                                      { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / 96000.0); });
+        auto hp = planImport ({ hi.getFullPathName() });
+        auto r = importSource (hp.sources[0], { dest ("T08_Hi_001.wav") }, 48000, 32, 0);
+        auto rd = openWav (dest ("T08_Hi_001.wav"));
+        CHECK (r.ok && rd != nullptr && rd->lengthInSamples == 48000);
+        juce::AudioBuffer<float> b (1, 48000);
+        if (rd != nullptr) rd->read (&b, 0, 48000, 0, true, false);
+        float worst = 0;
+        for (int i = 2000; i < 46000; ++i)
+            worst = juce::jmax (worst, std::abs (b.getSample (0, i) - 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0)));
+        CHECK (worst < 0.01f);
+    }
+    // polyphonic -> one mono file per channel
+    {
+        std::vector<juce::File> d;
+        for (int c = 0; c < 4; ++c) d.push_back (dest ("T0" + juce::String (3 + c) + "_Show_" + juce::String (c + 1) + "_001.wav"));
+        auto r = importSource (plan.sources[2], d, 48000, 24, 0);
+        CHECK (r.ok && r.written.size() == 4);
+        bool good = true;
+        for (int c = 0; c < 4; ++c)
+        {
+            auto rd = openWav (d[(size_t) c]);
+            juce::AudioBuffer<float> b (1, 2000);
+            good = good && rd != nullptr && rd->numChannels == 1 && rd->lengthInSamples == 2000;
+            if (rd != nullptr) rd->read (&b, 0, 2000, 0, true, false);
+            good = good && std::abs (b.getSample (0, 1000) - 0.1f * (float) (c + 1)) < 1.0e-4f;
+        }
+        CHECK (good);
+    }
+    // cancel removes partial files
+    {
+        std::atomic<bool> cancel { true };
+        auto r = importSource (plan.sources[0], { dest ("T09_X_001.wav") }, 48000, 24, 0, &cancel);
+        CHECK (! r.ok && ! dest ("T09_X_001.wav").exists());
+    }
+
+    // manifest: imported files follow their (new) tracks, even after a reorder
+    PatchState p;
+    setDeviceChannels (p, { "1", "2", "3", "4" }, { "1", "2", "3", "4" });
+    addTracks (p, 2, 0, false, false);
+    int idKick = 0, idPb = 0;
+    CHECK (addNamedTrack (p, "Kick In", false, false, &idKick).wasOk());
+    CHECK (addNamedTrack (p, "Playback", true, false, &idPb).wasOk());
+    CHECK (p.tracks[2].name == "Kick In" && ! p.tracks[2].armed && ! p.tracks[2].autoName);
+    CHECK (p.tracks[3].stereo == false && p.tracks[3].input == -1);   // no free pair left on a 4-input device
+    CHECK (appendToManifest (root, 1, { { idKick, 2, 1, "Kick In", dest ("T01_Kick_In_001.wav") },
+                                        { idPb, 3, 2, "Playback", dest ("T02_Playback_001.wav") } }));
+    auto files = resolveTakeFiles (root, 1, p);
+    CHECK (files.size() == 2 && files[2] == dest ("T01_Kick_In_001.wav") && files[3] == dest ("T02_Playback_001.wav"));
+    moveTracks (p, { 3 }, 0, false);
+    files = resolveTakeFiles (root, 1, p);
+    CHECK (files[0] == dest ("T02_Playback_001.wav"));
+    CHECK (takeLength (files) == 48000 || std::abs ((int) takeLength (files) - 48000) <= 1);
+}
+
+static void testFeedback()
+{
+    SECTION ("Feedback: GitHub issue links");
+    feedback::Report r;
+    r.kind = feedback::Kind::feature;
+    r.title = "Ripple delete & more";
+    r.description = "Line one\nLine two";
+    r.systemInfo = "LiveDeck 0.5.0\nmacOS";
+    const auto url = feedback::newIssueUrl ("creativedamage/LiveDeck", r);
+    CHECK (url.startsWith ("https://github.com/creativedamage/LiveDeck/issues/new?"));
+    CHECK (url.contains ("labels=enhancement"));
+    CHECK (url.contains ("%5BFeature%5D") && url.contains ("%26"));   // title encoded
+    CHECK (feedback::issueBody (r).contains ("LiveDeck 0.5.0"));
+    r.includeSystemInfo = false;
+    CHECK (! feedback::issueBody (r).contains ("LiveDeck 0.5.0"));
+
+    r.kind = feedback::Kind::bug;
+    r.steps = "1. Drop a file";
+    CHECK (feedback::issueBody (r).contains ("Steps to reproduce"));
+    CHECK (feedback::issueTitle (r).startsWith ("[Bug] "));
+    r.description = juce::String::repeatedString ("very long text ", 2000);
+    const auto longUrl = feedback::newIssueUrl ("creativedamage/LiveDeck", r);
+    CHECK (longUrl.length() <= 7000);
+    CHECK (longUrl.contains ("Shortened"));
+    CHECK (feedback::issuesUrl ("o/r", feedback::Kind::bug).contains ("label%3Abug"));
+}
+
+static void testLibrary()
+{
+    SECTION ("Library folders: Documents/LiveDeck/Shows and Templates");
+    const auto home = tempDir ("home");
+    const juce::String oldHome (std::getenv ("HOME") != nullptr ? std::getenv ("HOME") : "");
+    setenv ("HOME", home.getFullPathName().toRawUTF8(), 1);
+    const auto root = Library::root();
+    CHECK (root.isAChildOf (home));
+    CHECK (Library::ensure());
+    CHECK (Library::shows().isDirectory() && Library::templates().isDirectory());
+    CHECK (root.getChildFile ("About this folder.txt").existsAsFile());
+    Library::templates().getChildFile ("B Band.ldtemplate").replaceWithText ("{}");
+    Library::templates().getChildFile ("A Band.ldtemplate").replaceWithText ("{}");
+    Library::templates().getChildFile ("ignore.txt").replaceWithText ("x");
+    const auto t = Library::listTemplates();
+    CHECK (t.size() == 2 && t[0].getFileName() == "A Band.ldtemplate");
+    Library::shows().deleteRecursively();
+    CHECK (Library::ensure() && Library::shows().isDirectory());   // re-created if deleted
+    setenv ("HOME", oldHome.toRawUTF8(), 1);
+}
+
 int main (int argc, char** argv)
 {
 
@@ -906,6 +1081,9 @@ int main (int argc, char** argv)
     testRemote();
     testMultiDevice();
     testFailedTarget();
+    testImport();
+    testFeedback();
+    testLibrary();
     testBenchmark();
     if (big) testRF64();
     std::printf ("\n%d checks, %d failures\n", checks, failures);
