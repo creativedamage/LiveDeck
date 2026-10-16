@@ -1,0 +1,89 @@
+# Publishes a GitHub Release when a version tag (v1.2.3) is pushed.
+# scripts/release.sh creates the tag for you.
+#
+# Assets (the in-app updater downloads the -mac.zip and checks it against the .sha256):
+#   LiveDeck-<version>.dmg              drag-to-Applications installer
+#   LiveDeck-<version>-mac.zip          update package
+#   LiveDeck-<version>-mac.zip.sha256   checksum
+#
+# Optional, for builds that open without Gatekeeper warnings on any Mac
+# (Settings > Secrets and variables > Actions):
+#   MACOS_CERT_P12           base64 of your "Developer ID Application" certificate (.p12)
+#   MACOS_CERT_PASSWORD      password of that .p12
+#   MACOS_SIGNING_IDENTITY   e.g. "Developer ID Application: Wayne Goodman (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarization (app-specific password)
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 75
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the version in CMakeLists.txt
+        run: |
+          V=$(sed -n 's/^project(LiveDeck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match CMakeLists.txt version $V"; exit 1
+          fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KC="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "DEVELOPER_ID=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Store notarization credentials
+        if: env.APPLE_ID != '' && env.MACOS_CERT_P12 != ''
+        run: |
+          xcrun notarytool store-credentials livedeck-notary \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          echo "NOTARY_PROFILE=livedeck-notary" >> "$GITHUB_ENV"
+
+      - name: Build, test, sign and package (universal)
+        env:
+          LIVEDECK_GITHUB_REPO: ${{ github.repository }}
+        run: ./scripts/build-mac-app.sh
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '/^## /{p = ($2 == v); next} p' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then echo "LiveDeck $VERSION" > "$RUNNER_TEMP/notes.md"; fi
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/LiveDeck-$VERSION.dmg" \
+            "dist/LiveDeck-$VERSION-mac.zip" \
+            "dist/LiveDeck-$VERSION-mac.zip.sha256" \
+            --title "LiveDeck $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"

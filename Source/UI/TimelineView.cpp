@@ -1,0 +1,640 @@
+#include "TimelineView.h"
+
+static void setupToolButton (juce::TextButton& b, const juce::String& tip)
+{
+    b.setTooltip (tip);
+    b.setWantsKeyboardFocus (false);
+    b.setMouseClickGrabsKeyboardFocus (false);
+}
+
+TimelineView::TimelineView()
+{
+    setWantsKeyboardFocus (false);
+    setMouseClickGrabsKeyboardFocus (false);
+    setOpaque (true);
+
+    for (auto* sb : { &hbar, &vbar })
+    {
+        sb->addListener (this);
+        sb->setAutoHide (false);
+        addAndMakeVisible (sb);
+    }
+
+    setupToolButton (zoomOut, "Zoom out (Cmd + scroll)");
+    setupToolButton (zoomIn, "Zoom in (Cmd + scroll)");
+    setupToolButton (fit, "Show the whole take");
+    setupToolButton (followBtn, "Keep the playhead in view while playing or recording");
+    setupToolButton (small, "Small rows");
+    setupToolButton (medium, "Medium rows");
+    setupToolButton (large, "Large rows");
+    followBtn.setClickingTogglesState (true);
+    followBtn.setToggleState (true, juce::dontSendNotification);
+    followBtn.setColour (juce::TextButton::buttonOnColourId, Theme::green.withAlpha (0.6f));
+
+    zoomOut.onClick = [this] { userZoomed = true; zoomAround (1.6, kHeaderW + laneWidth() / 2); };
+    zoomIn.onClick = [this] { userZoomed = true; zoomAround (1.0 / 1.6, kHeaderW + laneWidth() / 2); };
+    fit.onClick = [this] { userZoomed = false; zoomToFit(); };
+    followBtn.onClick = [this] { follow = followBtn.getToggleState(); followPlayhead(); repaint(); };
+    small.onClick = [this] { setRowHeight (34); };
+    medium.onClick = [this] { setRowHeight (56); };
+    large.onClick = [this] { setRowHeight (92); };
+
+    for (auto* b : { &zoomOut, &zoomIn, &fit, &followBtn, &small, &medium, &large })
+        addAndMakeVisible (b);
+
+    renameEditor.setFont (Theme::ui (13.0f, true));
+    renameEditor.setJustification (juce::Justification::centredLeft);
+    renameEditor.setIndents (4, 2);
+    renameEditor.onReturnKey = [this] { commitRename (0); };
+    renameEditor.onEscapeKey = [this] { renameRow = -1; renameEditor.setVisible (false); if (onInteraction) onInteraction(); };
+    renameEditor.onFocusLost = [this] { if (renameRow >= 0) commitRename (0); };
+    renameEditor.onTab = [this] (bool back) { commitRename (back ? -1 : 1); };
+    addChildComponent (renameEditor);
+}
+
+// ------------------------------------------------------------------------------------ model
+
+void TimelineView::setTracks (const std::vector<omr::TrackState>& tracks, bool rec, const std::set<int>& selectedIds)
+{
+    rows.resize (tracks.size());
+    for (size_t i = 0; i < tracks.size(); ++i)
+    {
+        auto& r = rows[i];
+        const auto& t = tracks[i];
+        r.name = t.name;
+        r.paletteIndex = t.colour;
+        r.colour = Theme::trackColour (t.id - 1, t.colour);   // automatic colour follows the track, not the row
+        r.armed = t.armed;
+        r.mute = t.mute;
+        r.solo = t.solo;
+        r.hasInput = t.input >= 0;
+        r.stereo = t.stereo;
+        r.selected = selectedIds.count (t.id) > 0;
+    }
+    recordingSession = rec;
+    updateScrollBars();
+    repaint();
+}
+
+void TimelineView::setPeaks (int track, std::shared_ptr<omr::PeakStore> store)
+{
+    if (track >= 0 && track < (int) rows.size()) rows[(size_t) track].peaks = std::move (store);
+    repaint();
+}
+
+void TimelineView::clearPeaks()
+{
+    for (auto& r : rows) r.peaks.reset();
+    repaint();
+}
+
+void TimelineView::setSampleRate (double sr) { sampleRate = juce::jmax (1.0, sr); }
+
+void TimelineView::setLength (uint64_t frames)
+{
+    if (frames == length) return;
+    length = frames;
+    updateScrollBars();
+    repaint();
+}
+
+void TimelineView::setMarkers (std::vector<Marker> m) { markers = std::move (m); repaint(); }
+void TimelineView::setTitle (const juce::String& t)   { if (t != title) { title = t; repaint(); } }
+
+void TimelineView::setTransport (bool p, bool r)
+{
+    if (p == playing && r == recording) return;
+    playing = p;
+    recording = r;
+    repaint();
+}
+
+void TimelineView::setPlayhead (uint64_t frame)
+{
+    if (frame == playhead && ! playing && ! recording) return;
+    playhead = frame;
+    followPlayhead();
+    repaint();
+}
+
+void TimelineView::setFollow (bool on)
+{
+    follow = on;
+    followBtn.setToggleState (on, juce::dontSendNotification);
+    followPlayhead();
+}
+
+uint64_t TimelineView::contentLength() const
+{
+    uint64_t len = length;
+    for (const auto& r : rows)
+        if (r.peaks != nullptr) len = std::max (len, r.peaks->frames());
+    return len;
+}
+
+void TimelineView::zoomToFit()
+{
+    const auto len = contentLength();
+    fpp = len > 0 ? juce::jmax (1.0, (double) len / (laneWidth() * 0.97))
+                  : sampleRate * 120.0 / laneWidth();   // empty: show two minutes
+    viewStart = 0;
+    updateScrollBars();
+    repaint();
+}
+
+void TimelineView::zoomAround (double factor, int x)
+{
+    const double anchor = xToFrame ((float) x);
+    const double maxFpp = juce::jmax ((double) contentLength(), sampleRate * 600.0) / juce::jmax (1, laneWidth()) * 2.0;
+    fpp = juce::jlimit (0.5, juce::jmax (1.0, maxFpp), fpp * factor);
+    viewStart = juce::jmax (0.0, anchor - (x - kHeaderW) * fpp);
+    updateScrollBars();
+    repaint();
+}
+
+void TimelineView::setRowHeight (int h)
+{
+    rowH = h;
+    updateScrollBars();
+    repaint();
+}
+
+void TimelineView::followPlayhead()
+{
+    if (! follow || dragging || ! (playing || recording)) return;
+    const float x = frameToX ((double) playhead);
+    if (x > (float) kHeaderW + (float) laneWidth() * 0.92f || x < (float) kHeaderW)
+    {
+        viewStart = juce::jmax (0.0, (double) playhead - laneWidth() * fpp * 0.08);
+        updateScrollBars();
+    }
+}
+
+void TimelineView::updateScrollBars()
+{
+    const double visible = laneWidth() * fpp;
+    const double total = juce::jmax ((double) contentLength() + visible * 0.5, viewStart + visible);
+    hbar.setRangeLimits (0.0, total, juce::dontSendNotification);
+    hbar.setCurrentRange (viewStart, visible, juce::dontSendNotification);
+
+    const int contentH = (int) rows.size() * rowH;
+    const int viewH = rowsArea().getHeight();
+    scrollY = juce::jlimit (0, juce::jmax (0, contentH - viewH), scrollY);
+    vbar.setRangeLimits (0.0, juce::jmax (contentH, viewH), juce::dontSendNotification);
+    vbar.setCurrentRange (scrollY, viewH, juce::dontSendNotification);
+}
+
+void TimelineView::scrollBarMoved (juce::ScrollBar* sb, double start)
+{
+    if (sb == &hbar)
+    {
+        viewStart = juce::jmax (0.0, start);
+        if (playing || recording) setFollow (false); // the user took over the view
+    }
+    else scrollY = (int) start;
+    repaint();
+}
+
+// ------------------------------------------------------------------------------------ layout
+
+void TimelineView::resized()
+{
+    auto tb = toolbarArea().reduced (6, 3);
+    followBtn.setBounds (tb.removeFromRight (58));
+    tb.removeFromRight (4);
+    fit.setBounds (tb.removeFromRight (40));
+    tb.removeFromRight (2);
+    zoomIn.setBounds (tb.removeFromRight (26));
+    tb.removeFromRight (2);
+    zoomOut.setBounds (tb.removeFromRight (26));
+    tb.removeFromRight (14);
+    large.setBounds (tb.removeFromRight (24));
+    medium.setBounds (tb.removeFromRight (24));
+    small.setBounds (tb.removeFromRight (24));
+
+    const auto ra = rowsArea();
+    vbar.setBounds (getWidth() - kScrollW, ra.getY(), kScrollW, ra.getHeight());
+    hbar.setBounds (kHeaderW, getHeight() - kScrollW, laneWidth(), kScrollW);
+    if (! userZoomed && length == 0) zoomToFit();
+    updateScrollBars();
+}
+
+juce::Rectangle<int> TimelineView::rowBounds (int i) const
+{
+    const auto ra = rowsArea();
+    return { 0, ra.getY() + i * rowH - scrollY, ra.getWidth(), rowH };
+}
+
+int TimelineView::rowAtY (int y) const
+{
+    const auto ra = rowsArea();
+    if (y < ra.getY() || y >= ra.getBottom()) return -1;
+    const int i = (y - ra.getY() + scrollY) / rowH;
+    return i < (int) rows.size() ? i : -1;
+}
+
+juce::Rectangle<int> TimelineView::buttonRect (juce::Rectangle<int> header, int index) const
+{
+    constexpr int w = 26, h = 16, gap = 3;
+    const int x = header.getRight() - 8 - (3 - index) * (w + gap) + gap;
+    return { x, header.getCentreY() - h / 2, w, h };
+}
+
+TimelineView::HeaderHit TimelineView::hitHeader (juce::Point<int> p, int& row) const
+{
+    row = rowAtY (p.y);
+    if (row < 0 || p.x >= kHeaderW) return HeaderHit::none;
+    const auto header = rowBounds (row).withWidth (kHeaderW);
+    if (buttonRect (header, 0).expanded (2).contains (p)) return HeaderHit::arm;
+    if (buttonRect (header, 1).expanded (2).contains (p)) return HeaderHit::mute;
+    if (buttonRect (header, 2).expanded (2).contains (p)) return HeaderHit::solo;
+    return HeaderHit::body;
+}
+
+// ------------------------------------------------------------------------------------ paint
+
+static juce::String formatTime (double secs, double step)
+{
+    const int total = (int) secs;
+    const int h = total / 3600, m = (total / 60) % 60, s = total % 60;
+    juce::String out = h > 0 ? juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2) : juce::String (m);
+    out << ":" << juce::String (s).paddedLeft ('0', 2);
+    if (step < 1.0) out << "." << juce::String ((int) ((secs - total) * 10.0));
+    return out;
+}
+
+void TimelineView::paintRuler (juce::Graphics& g)
+{
+    const auto r = rulerArea();
+    g.setColour (Theme::panel);
+    g.fillRect (r);
+    g.setColour (Theme::edge);
+    g.drawHorizontalLine (r.getBottom() - 1, (float) r.getX(), (float) r.getRight());
+
+    static const double steps[] = { 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600 };
+    double step = steps[std::size (steps) - 1];
+    for (double s : steps) if (s * sampleRate / fpp >= 80.0) { step = s; break; }
+
+    const double firstSec = std::floor (viewStart / sampleRate / step) * step;
+    const double lastSec = xToFrame ((float) r.getRight()) / sampleRate;
+    g.setFont (Theme::mono (10.5f));
+    for (double s = firstSec; s <= lastSec; s += step)
+    {
+        const float x = frameToX (s * sampleRate);
+        if (x < (float) r.getX()) continue;
+        g.setColour (Theme::textDim);
+        g.drawVerticalLine ((int) x, (float) r.getBottom() - 8.0f, (float) r.getBottom());
+        g.drawText (formatTime (s, step), juce::Rectangle<float> (x + 3.0f, (float) r.getY() + 2.0f, 70.0f, 14.0f), juce::Justification::centredLeft);
+        for (int k = 1; k < 4; ++k) // minor ticks
+        {
+            const float mx = frameToX ((s + step * k / 4.0) * sampleRate);
+            g.drawVerticalLine ((int) mx, (float) r.getBottom() - 4.0f, (float) r.getBottom());
+        }
+    }
+
+    // markers: yellow flag + label
+    for (const auto& m : markers)
+    {
+        const float x = frameToX ((double) m.frame);
+        if (x < (float) r.getX() - 80.0f || x > (float) r.getRight()) continue;
+        juce::Path flag;
+        flag.addTriangle (x, (float) r.getBottom() - 12.0f, x + 6.0f, (float) r.getBottom() - 6.0f, x, (float) r.getBottom());
+        g.setColour (Theme::yellow);
+        g.fillPath (flag);
+        g.setFont (Theme::ui (10.5f, true));
+        g.drawText (m.label, juce::Rectangle<float> (x + 8.0f, (float) r.getBottom() - 13.0f, 120.0f, 12.0f), juce::Justification::centredLeft);
+    }
+}
+
+void TimelineView::paintRow (juce::Graphics& g, int i, juce::Rectangle<int> r)
+{
+    const auto& row = rows[(size_t) i];
+    auto header = r.withWidth (kHeaderW);
+    auto lane = r.withTrimmedLeft (kHeaderW);
+
+    // ---- header: track colour block with name and REC / M / S
+    g.setColour (row.colour.withMultipliedBrightness (row.mute ? 0.45f : 0.85f));
+    g.fillRect (header.reduced (0, 1));
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    g.fillRect (header.getRight() - 2, header.getY(), 2, header.getHeight());
+
+    if (row.selected)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.22f));
+        g.fillRect (header.reduced (0, 1));
+        g.setColour (juce::Colours::white);
+        g.drawRect (header.reduced (1, 2), 2);
+        g.setColour (juce::Colours::white.withAlpha (0.05f));
+        g.fillRect (lane);
+    }
+
+    const auto textArea = header.withTrimmedLeft (8).withTrimmedRight (3 * 29 + 10);
+    g.setColour (juce::Colours::black.withAlpha (0.85f));
+    if (rowH >= 48)
+    {
+        g.setFont (Theme::mono (10.0f));
+        g.drawText (juce::String (i + 1) + (row.stereo ? "   ST" : ""), textArea.withHeight (16).translated (0, 4), juce::Justification::centredLeft);
+        g.setFont (Theme::ui (13.0f, true));
+        g.drawText (row.name, textArea.withTrimmedTop (18).withHeight (18), juce::Justification::centredLeft, true);
+    }
+    else
+    {
+        g.setFont (Theme::ui (12.0f, true));
+        g.drawText (juce::String (i + 1) + (row.stereo ? " ST " : "  ") + row.name, textArea, juce::Justification::centredLeft, true);
+    }
+
+    auto drawButton = [&] (int idx, const juce::String& label, bool on, juce::Colour activeColour)
+    {
+        const auto b = buttonRect (header, idx).toFloat();
+        g.setColour (on ? activeColour : juce::Colour (0xcc15171b));
+        g.fillRoundedRectangle (b, 3.0f);
+        g.setColour (on ? juce::Colours::black : Theme::textDim);
+        g.setFont (Theme::ui (10.0f, true));
+        g.drawText (label, b, juce::Justification::centred);
+    };
+    drawButton (0, "REC", row.armed, Theme::red);
+    drawButton (1, "M", row.mute, Theme::yellow);
+    drawButton (2, "S", row.solo, Theme::green);
+
+    // ---- lane
+    g.setColour ((i & 1) ? juce::Colour (0xff15181c) : juce::Colour (0xff181b20));
+    g.fillRect (lane);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.drawHorizontalLine (r.getBottom() - 1, (float) lane.getX(), (float) lane.getRight());
+
+    if (row.peaks == nullptr) return;
+    const double frames = (double) row.peaks->frames();
+    const float x0 = juce::jmax ((float) lane.getX(), frameToX (0.0));
+    const float x1 = juce::jmin ((float) lane.getRight(), frameToX (frames));
+    if (x1 <= x0) return;
+
+    const bool live = recording && recordingSession;
+    auto clip = juce::Rectangle<float> (x0, (float) lane.getY() + 2.0f, x1 - x0, (float) lane.getHeight() - 5.0f);
+    g.setColour (row.colour.withAlpha (row.mute ? 0.10f : 0.22f));
+    g.fillRect (clip);
+    g.setColour (live && row.armed ? Theme::red : row.colour.withAlpha (0.8f));
+    g.fillRect (clip.withHeight (2.0f));
+
+    const int px0 = (int) x0, w = (int) x1 - px0;
+    if (w <= 0) return;
+    scratch.resize ((size_t) w);
+    row.peaks->render (xToFrame ((float) px0), fpp, w, scratch.data());
+
+    const float mid = clip.getCentreY() + 1.0f;
+    const float half = clip.getHeight() * 0.5f - 3.0f;
+    juce::RectangleList<float> bars;
+    bars.ensureStorageAllocated (w);
+    for (int k = 0; k < w; ++k)
+    {
+        const float v = scratch[(size_t) k];
+        if (v <= 0.0f) continue;
+        const float hh = juce::jmax (0.5f, v * half);
+        bars.addWithoutMerging ({ (float) (px0 + k), mid - hh, 1.0f, hh * 2.0f });
+    }
+    g.setColour (row.colour.interpolatedWith (juce::Colours::white, 0.6f).withAlpha (row.mute ? 0.35f : 0.92f));
+    g.fillRectList (bars);
+}
+
+void TimelineView::paint (juce::Graphics& g)
+{
+    g.fillAll (Theme::bg);
+
+    // toolbar
+    const auto tb = toolbarArea();
+    g.setColour (Theme::panel);
+    g.fillRect (tb);
+    g.setColour (recording ? Theme::red : (playing ? Theme::green : Theme::text));
+    g.setFont (Theme::ui (12.0f, true));
+    const double secs = (double) contentLength() / sampleRate;
+    g.drawText (title + (secs > 0 ? "   " + formatTime (secs, 1.0) : juce::String()), tb.reduced (10, 0).withWidth (400), juce::Justification::centredLeft);
+    g.setColour (Theme::textDim);
+    g.setFont (Theme::ui (11.0f));
+    g.drawText ("Click or drag to locate.  Cmd+scroll zooms.  Space plays/stops.",
+                tb.withTrimmedLeft (420).withTrimmedRight (330), juce::Justification::centredRight, true);
+
+    // corner above the headers
+    const auto corner = juce::Rectangle<int> (0, kToolbarH, kHeaderW, kRulerH);
+    g.setColour (Theme::panel);
+    g.fillRect (corner);
+    g.setColour (Theme::textDim);
+    g.setFont (Theme::ui (11.0f, true));
+    g.drawText ("TRACKS  (" + juce::String ((int) rows.size()) + ")", corner.reduced (10, 0), juce::Justification::centredLeft);
+
+    paintRuler (g);
+
+    // rows
+    {
+        juce::Graphics::ScopedSaveState s (g);
+        const auto ra = rowsArea();
+        g.reduceClipRegion (ra);
+        const int first = juce::jmax (0, scrollY / rowH);
+        const int last = juce::jmin ((int) rows.size() - 1, (scrollY + ra.getHeight()) / rowH);
+        for (int i = first; i <= last; ++i) paintRow (g, i, rowBounds (i));
+        if (rows.empty())
+        {
+            g.setColour (Theme::textDim);
+            g.setFont (Theme::ui (13.0f));
+            g.drawText ("No tracks: choose an audio device in Audio Setup", ra, juce::Justification::centred);
+        }
+
+        // drag-and-drop insertion line
+        if (reordering && dropIndex >= 0)
+        {
+            const int y = ra.getY() + dropIndex * rowH - scrollY;
+            g.setColour (Theme::blue);
+            g.fillRect (0, y - 2, ra.getWidth(), 4);
+        }
+
+        // marker lines across the lanes
+        g.reduceClipRegion (ra.withTrimmedLeft (kHeaderW));
+        for (const auto& m : markers)
+        {
+            const float x = frameToX ((double) m.frame);
+            g.setColour (Theme::yellow.withAlpha (0.45f));
+            const float dash[] = { 4.0f, 4.0f };
+            g.drawDashedLine (juce::Line<float> (x, (float) ra.getY(), x, (float) ra.getBottom()), dash, 2, 1.0f);
+        }
+    }
+
+    // playhead across ruler + lanes
+    const float px = frameToX (dragging ? dragFrame : (double) playhead);
+    if (px >= (float) kHeaderW && px <= (float) (kHeaderW + laneWidth()))
+    {
+        const auto col = recording ? Theme::red : (playing ? Theme::green : juce::Colours::white);
+        g.setColour (col);
+        g.fillRect (px - 0.75f, (float) kToolbarH, 1.5f, (float) (rowsArea().getBottom() - kToolbarH));
+        juce::Path tri;
+        tri.addTriangle (px - 6.0f, (float) kToolbarH, px + 6.0f, (float) kToolbarH, px, (float) kToolbarH + 9.0f);
+        g.fillPath (tri);
+    }
+
+    g.setColour (Theme::edge);
+    g.drawHorizontalLine (getHeight() - kScrollW - 1, 0.0f, (float) getWidth());
+}
+
+// ------------------------------------------------------------------------------------ mouse
+
+void TimelineView::mouseMove (const juce::MouseEvent& e)
+{
+    const bool inLanes = e.x >= kHeaderW && e.y >= kToolbarH && e.y < rowsArea().getBottom();
+    setMouseCursor (inLanes ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
+}
+
+void TimelineView::mouseDown (const juce::MouseEvent& e)
+{
+    if (renameRow >= 0) commitRename (0);
+    if (onInteraction) onInteraction();
+    const auto p = e.getPosition();
+    if (p.y < kToolbarH) return;
+
+    if (p.x < kHeaderW)
+    {
+        int row = -1;
+        const auto hit = hitHeader (p, row);
+        if (row < 0) return;
+        const auto& r = rows[(size_t) row];
+        if (e.mods.isPopupMenu())
+        {
+            if (onTrackMenu) onTrackMenu (row);
+            return;
+        }
+        if (hit == HeaderHit::arm && onArm)   { onArm (row, ! r.armed); return; }
+        if (hit == HeaderHit::mute && onMute) { onMute (row, ! r.mute); return; }
+        if (hit == HeaderHit::solo && onSolo) { onSolo (row, ! r.solo); return; }
+
+        // body: select (Shift = range, Cmd = toggle) and arm a possible drag-and-drop
+        if (onSelect) onSelect (row, e.mods);
+        pressRow = row;
+        pressY = p.y;
+        reorderArmed = true;
+        reordering = false;
+        return;
+    }
+
+    if (p.y < rowsArea().getBottom() && p.x < kHeaderW + laneWidth())
+    {
+        dragging = true;
+        dragFrame = juce::jmax (0.0, xToFrame ((float) p.x));
+        repaint();
+    }
+}
+
+int TimelineView::dropIndexForY (int y) const
+{
+    const auto ra = rowsArea();
+    const int idx = (int) std::lround ((double) (y - ra.getY() + scrollY) / (double) rowH);
+    return juce::jlimit (0, (int) rows.size(), idx);
+}
+
+void TimelineView::mouseDrag (const juce::MouseEvent& e)
+{
+    if (reorderArmed)
+    {
+        if (! reordering && std::abs (e.y - pressY) > 5) reordering = true;
+        if (reordering)
+        {
+            // auto-scroll when dragging near the top / bottom edge
+            const auto ra = rowsArea();
+            if (e.y < ra.getY() + 20) scrollY -= rowH / 3;
+            else if (e.y > ra.getBottom() - 20) scrollY += rowH / 3;
+            updateScrollBars();
+            dropIndex = dropIndexForY (e.y);
+            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+            repaint();
+        }
+        return;
+    }
+    if (! dragging) return;
+    dragFrame = juce::jlimit (0.0, juce::jmax (0.0, (double) contentLength()), xToFrame ((float) e.x));
+    repaint();
+}
+
+void TimelineView::mouseUp (const juce::MouseEvent&)
+{
+    if (reorderArmed)
+    {
+        const bool drop = reordering && dropIndex >= 0;
+        const int target = dropIndex;
+        reorderArmed = reordering = false;
+        dropIndex = -1;
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        repaint();
+        if (drop && onMoveSelected) onMoveSelected (target);
+        return;
+    }
+    if (! dragging) return;
+    dragging = false;
+    playhead = (uint64_t) dragFrame;
+    if (onLocate) onLocate (playhead);
+    repaint();
+}
+
+void TimelineView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    int row = -1;
+    if (e.x < kHeaderW && hitHeader (e.getPosition(), row) == HeaderHit::body && row >= 0) startRename (row);
+}
+
+void TimelineView::startRename (int row)
+{
+    if (row < 0 || row >= (int) rows.size()) return;
+    // scroll the row into view
+    const int viewH = rowsArea().getHeight();
+    if (row * rowH < scrollY) scrollY = row * rowH;
+    else if ((row + 1) * rowH > scrollY + viewH) scrollY = (row + 1) * rowH - viewH;
+    updateScrollBars();
+    repaint();
+
+    renameRow = row;
+    const auto header = rowBounds (row).withWidth (kHeaderW);
+    renameEditor.setBounds (header.withTrimmedLeft (6).withTrimmedRight (3 * 29 + 12).withSizeKeepingCentre (kHeaderW - 6 - 3 * 29 - 12, 24));
+    renameEditor.setText (rows[(size_t) row].name, juce::dontSendNotification);
+    renameEditor.setVisible (true);
+    renameEditor.grabKeyboardFocus();
+    renameEditor.selectAll();
+}
+
+void TimelineView::commitRename (int moveBy)
+{
+    if (renameRow < 0) return;
+    const int row = renameRow;
+    const auto text = renameEditor.getText().trim();
+    const int next = row + moveBy;
+
+    if (moveBy != 0 && next >= 0 && next < (int) rows.size())
+    {
+        // Tab: keep the editor visible and focused, just move it to the next track
+        if (onRename && text != rows[(size_t) row].name) onRename (row, text);
+        startRename (next);
+        return;
+    }
+
+    renameRow = -1;
+    renameEditor.setVisible (false);
+    if (onRename && text != rows[(size_t) row].name) onRename (row, text);
+    if (onInteraction) onInteraction();
+}
+
+void TimelineView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+{
+    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    {
+        userZoomed = true;
+        const float d = std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX;
+        zoomAround (d > 0 ? 1.0 / 1.25 : 1.25, juce::jmax (kHeaderW, e.x));
+        return;
+    }
+    const bool horizontal = e.mods.isShiftDown() || std::abs (w.deltaX) > std::abs (w.deltaY);
+    if (horizontal)
+    {
+        const float d = std::abs (w.deltaX) > std::abs (w.deltaY) ? w.deltaX : w.deltaY;
+        viewStart = juce::jmax (0.0, viewStart - (double) d * (double) laneWidth() * fpp * 0.5);
+        if (playing || recording) setFollow (false);
+    }
+    else
+    {
+        scrollY -= (int) (w.deltaY * (float) rowH * 4.0f);
+    }
+    updateScrollBars();
+    repaint();
+}
