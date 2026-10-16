@@ -1042,9 +1042,10 @@ static void testFeedback()
 static void testLibrary()
 {
     SECTION ("Library folders: Documents/LiveDeck/Shows and Templates");
+    // Never the real ~/Documents: this test deletes folders.
     const auto home = tempDir ("home");
-    const juce::String oldHome (std::getenv ("HOME") != nullptr ? std::getenv ("HOME") : "");
-    setenv ("HOME", home.getFullPathName().toRawUTF8(), 1);
+    CHECK (Library::root().getFileName() == "LiveDeck");
+    Library::setRootForTesting (home.getChildFile ("Documents").getChildFile ("LiveDeck"));
     const auto root = Library::root();
     CHECK (root.isAChildOf (home));
     CHECK (Library::ensure());
@@ -1057,7 +1058,7 @@ static void testLibrary()
     CHECK (t.size() == 2 && t[0].getFileName() == "A Band.ldtemplate");
     Library::shows().deleteRecursively();
     CHECK (Library::ensure() && Library::shows().isDirectory());   // re-created if deleted
-    setenv ("HOME", oldHome.toRawUTF8(), 1);
+    Library::setRootForTesting ({});
 }
 
 int main (int argc, char** argv)

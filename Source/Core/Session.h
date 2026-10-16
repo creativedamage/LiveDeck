@@ -35,6 +35,7 @@ namespace Library
     juce::File templates();     // templates are saved and listed here
     bool ensure();              // creates the folders (and a short read-me); true if they exist afterwards
     juce::Array<juce::File> listTemplates();   // *.ldtemplate in templates(), by name
+    void setRootForTesting (const juce::File& root);   // tests only: never touch the user's real Documents
 }
 
 struct SessionSettings

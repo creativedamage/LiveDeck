@@ -48,7 +48,14 @@ namespace SessionPaths
 
 namespace Library
 {
-    juce::File root()      { return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("LiveDeck"); }
+    static juce::File& rootOverride() { static juce::File f; return f; }
+    void setRootForTesting (const juce::File& r) { rootOverride() = r; }
+
+    juce::File root()
+    {
+        if (rootOverride() != juce::File()) return rootOverride();
+        return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("LiveDeck");
+    }
     juce::File shows()     { return root().getChildFile ("Shows"); }
     juce::File templates() { return root().getChildFile ("Templates"); }
 
