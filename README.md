@@ -46,9 +46,19 @@ LiveDeck records every channel of your show from SoundGrid, Dante, MADI or any U
 
 1. [Download LiveDeck](https://github.com/creativedamage/LiveDeck/releases/latest), open the `.dmg` and drag LiveDeck to Applications.
 2. The first time, right-click LiveDeck and choose **Open** (it isn't notarized by Apple yet).
-3. Choose your interface in **Audio Setup** (Cmd+,).
-4. **File > New Session** creates a show folder in **Documents > LiveDeck > Shows**, or anywhere you choose, such as an external SSD.
-5. Add tracks with **+ Track**, arm them, and press **REC**.
+3. Create an account (email and password, Google or Microsoft), enter your organization's details, and choose a license.
+4. Choose your interface in **Audio Setup** (Cmd+,).
+5. **File > New Session** creates a show folder in **Documents > LiveDeck > Shows**, or anywhere you choose, such as an external SSD.
+6. Add tracks with **+ Track**, arm them, and press **REC**.
+
+## Pricing
+
+| | Price | Includes |
+| --- | --- | --- |
+| **Annual** | $50 / year | All updates while active |
+| **Perpetual** | $129 once | All updates |
+
+Every license runs LiveDeck on **2 computers at a time on the same network**. Verified non-profits get **10% off** and pay no sales tax. Sign in with email and password or your Google or Microsoft account, register your organization, and buy in the app. LiveDeck checks your license when it starts and keeps working offline for up to 14 days.
 
 ## Requirements
 
@@ -66,4 +76,4 @@ Use **Help > Request a Feature**, **Report a Bug** or **Send Feedback** in the a
 
 ## For developers
 
-Building from source, releasing and how the engine works: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+Building from source, releasing and how the engine works: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Accounts and licensing setup: [docs/LICENSING.md](docs/LICENSING.md). What changed in each version: [CHANGELOG.md](CHANGELOG.md).

@@ -1,5 +1,6 @@
 #pragma once
 #include "Audio/AudioEngine.h"
+#include "AccountUI.h"
 #include "ChannelStrip.h"
 #include "RemoteControl.h"
 #include "TimelineView.h"
@@ -146,6 +147,20 @@ private:
     void finishImport (std::shared_ptr<ImportJob> job);
     std::shared_ptr<std::atomic<bool>> importCancel;
     bool importRunning = false;
+
+    // accounts + licensing
+    void licenseGranted (const AccountService::Check& c);
+    void heartbeat();
+    void showAccountPanel();
+    void showAdminPanel();
+    void showRegistration();
+    void signOutOfAccount();
+    void changePassword();
+    std::unique_ptr<AccountService> account;
+    std::unique_ptr<LicenseGate> gate;
+    bool licensed = false;
+    double lastHeartbeatMs = 0;
+    juce::String lastLicenseWarning;
 
     void showUpdateOffer (const struct UpdateOffer& offer);
     void installUpdate (std::shared_ptr<struct UpdateOffer> offer);

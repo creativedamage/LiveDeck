@@ -37,7 +37,7 @@ namespace MeterDraw
 
     inline void draw (juce::Graphics& g, juce::Rectangle<float> r, const MeterState& m, bool showClip = true)
     {
-        g.setColour (juce::Colour (0xff0a0b0d));
+        g.setColour (Theme::bg.darker (0.3f));
         g.fillRect (r);
         auto clipBox = showClip ? r.removeFromTop (5.0f) : juce::Rectangle<float>();
         if (showClip)
@@ -49,17 +49,20 @@ namespace MeterDraw
         const float h = r.getHeight();
         const float yPeak = toY (m.peak, h), yRms = toY (m.rms, h), yHold = toY (m.hold, h);
 
-        // peak bar, gradient by zone
-        auto peakBar = r.withTop (r.getY() + yPeak);
-        juce::ColourGradient grad (Theme::red, r.getX(), r.getY() + toY (1.0f, h), Theme::green, r.getX(), r.getBottom(), false);
-        grad.addColour (6.0 / 60.0, Theme::yellow);
-        grad.addColour (18.0 / 60.0, Theme::green);
-        g.setGradientFill (grad);
-        g.setOpacity (0.45f);
-        g.fillRect (peakBar);
-        g.setOpacity (1.0f);
-        // RMS bar, solid
-        g.fillRect (r.withTop (r.getY() + yRms).reduced (r.getWidth() * 0.18f, 0));
+        // Flat meter: solid zones (green below -18 dBFS, yellow to -6, red above). Peak = light bar, RMS = solid core.
+        const float y18 = r.getY() + toY (juce::Decibels::decibelsToGain (-18.0f), h);
+        const float y6 = r.getY() + toY (juce::Decibels::decibelsToGain (-6.0f), h);
+        auto zones = [&] (juce::Rectangle<float> bar, float alpha)
+        {
+            const auto lo = bar.withTop (juce::jmax (bar.getY(), y18));
+            const auto mid = bar.withTop (juce::jmax (bar.getY(), y6)).withBottom (juce::jmin (bar.getBottom(), y18));
+            const auto hi = bar.withBottom (juce::jmin (bar.getBottom(), y6));
+            g.setColour (Theme::green.withAlpha (alpha));  if (! lo.isEmpty()) g.fillRect (lo);
+            g.setColour (Theme::yellow.withAlpha (alpha)); if (mid.getHeight() > 0) g.fillRect (mid);
+            g.setColour (Theme::red.withAlpha (alpha));    if (hi.getHeight() > 0) g.fillRect (hi);
+        };
+        zones (r.withTop (r.getY() + yPeak), 0.45f);
+        zones (r.withTop (r.getY() + yRms).reduced (r.getWidth() * 0.18f, 0), 1.0f);
         // peak hold line
         if (m.hold > 0.001f)
         {

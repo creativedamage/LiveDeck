@@ -130,23 +130,22 @@ void ChannelStrip::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat().reduced (1.0f, 0);
     g.setColour ((track & 1) ? Theme::stripAlt : Theme::strip);
-    g.fillRoundedRectangle (r, 4.0f);
-
+    g.fillRect (r);
     if (selected)
     {
-        g.setColour (juce::Colours::white.withAlpha (0.07f));
-        g.fillRoundedRectangle (r, 4.0f);
-        g.setColour (juce::Colours::white);
-        g.drawRoundedRectangle (r.reduced (1.0f), 4.0f, 2.0f);
+        g.setColour (Theme::blue.withAlpha (0.16f));
+        g.fillRect (r);
+        g.setColour (Theme::blue);
+        g.fillRect (r.removeFromBottom (3.0f));
     }
     if (recordingState && armedState)
     {
         g.setColour (Theme::red);
-        g.drawRoundedRectangle (r.reduced (0.5f), 4.0f, 1.5f);
+        g.fillRect (r.withTrimmedTop (r.getHeight() - 3.0f));
     }
 
     g.setColour (colour);
-    g.fillRoundedRectangle (r.withHeight (12.0f).reduced (2.0f, 2.0f), 2.0f);  // track colour, matches the timeline
+    g.fillRect (r.withHeight (14.0f));   // track colour, matches the timeline
     g.setColour (juce::Colours::black.withAlpha (0.8f));
     g.setFont (Theme::mono (10.0f));
     g.drawText (juce::String (track + 1), getLocalBounds().removeFromTop (14).reduced (4, 0), juce::Justification::centredLeft);

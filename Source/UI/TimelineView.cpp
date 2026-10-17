@@ -352,8 +352,8 @@ void TimelineView::paintRow (juce::Graphics& g, int i, juce::Rectangle<int> r)
     auto drawButton = [&] (int idx, const juce::String& label, bool on, juce::Colour activeColour)
     {
         const auto b = buttonRect (header, idx).toFloat();
-        g.setColour (on ? activeColour : juce::Colour (0xcc15171b));
-        g.fillRoundedRectangle (b, 3.0f);
+        g.setColour (on ? activeColour : juce::Colours::black.withAlpha (0.35f));
+        g.fillRoundedRectangle (b, Theme::radius);
         g.setColour (on ? juce::Colours::black : Theme::textDim);
         g.setFont (Theme::ui (10.0f, true));
         g.drawText (label, b, juce::Justification::centred);
@@ -643,7 +643,7 @@ void TimelineView::paintDropOverlay (juce::Graphics& g)
                                                                          dropRowForY (fileHoverY) >= 0 ? rowBounds (dropRowForY (fileHoverY)).getBottom() + 30
                                                                                                       : fileHoverY - 50) });
         g.setColour (Theme::panel.withAlpha (0.92f));
-        g.fillRoundedRectangle (box.toFloat(), 8.0f);
+        g.fillRoundedRectangle (box.toFloat(), Theme::radius);
         g.setColour (Theme::text);
         g.drawText (msg, box, juce::Justification::centred);
     }
@@ -652,9 +652,9 @@ void TimelineView::paintDropOverlay (juce::Graphics& g)
         const auto box = juce::Rectangle<int> (0, 0, juce::jmin (ra.getWidth() - 20, 520), 34)
                              .withCentre ({ ra.getCentreX(), ra.getY() + 30 });
         g.setColour (Theme::panel.withAlpha (0.95f));
-        g.fillRoundedRectangle (box.toFloat(), 8.0f);
+        g.fillRoundedRectangle (box.toFloat(), Theme::radius);
         g.setColour (Theme::blue);
-        g.drawRoundedRectangle (box.toFloat().reduced (0.5f), 8.0f, 1.0f);
+        g.fillRect (box.withWidth (3));
         g.setColour (Theme::text);
         g.setFont (Theme::ui (13.0f));
         g.drawText (busyText, box.reduced (12, 0), juce::Justification::centred, true);

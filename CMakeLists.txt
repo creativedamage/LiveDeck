@@ -45,7 +45,8 @@ set(OMR_CORE_SOURCES
     Source/Core/Updater.cpp
     Source/Core/Remote.cpp
     Source/Core/AudioImport.cpp
-    Source/Core/Feedback.cpp)
+    Source/Core/Feedback.cpp
+    Source/Core/License.cpp)
 
 # ---------------------------------------------------------------------------
 # GitHub repository used for in-app updates ("owner/repo"). Taken from
@@ -89,6 +90,8 @@ target_sources(LiveDeck PRIVATE
     Source/UI/TimelineView.cpp
     Source/UI/RemoteControl.cpp
     Source/UI/FeedbackDialog.cpp
+    Source/UI/Account.cpp
+    Source/UI/AccountUI.cpp
     Source/UI/TransportBar.cpp
     Source/UI/MainComponent.cpp
     Source/Main.cpp)
@@ -103,6 +106,10 @@ target_compile_definitions(LiveDeck PRIVATE
     JUCE_WASAPI=1
     JUCE_DIRECTSOUND=0
     JUCE_JACK=0)
+# Accounts + licenses (sign-in and a license check at every launch). OFF only for development builds.
+option(LIVEDECK_LICENSING "Require a LiveDeck account and license" ON)
+target_compile_definitions(LiveDeck PRIVATE LIVEDECK_LICENSING=$<BOOL:${LIVEDECK_LICENSING}>)
+
 if(LIVEDECK_GITHUB_REPO)
     target_compile_definitions(LiveDeck PRIVATE LIVEDECK_GITHUB_REPO="${LIVEDECK_GITHUB_REPO}")
 endif()

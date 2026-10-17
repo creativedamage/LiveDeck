@@ -5,6 +5,11 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+- **LiveDeck accounts and licenses**: sign in with email and password (with email confirmation, Forgot Password and Change Password) or with Google or Microsoft, register your organization, and buy an annual ($50/year) or perpetual ($129) license through Stripe. Verified non-profits get 10% off and no sales tax.
+- Each license runs on 2 computers at a time on the same network. LiveDeck checks the license at every launch and can start offline for up to 14 days. It never locks during a show.
+- **Account menu**: Account and License, Edit Registration, Sign Out. Admins also get an Admin Panel to verify non-profits and to create, revoke or extend licenses.
+- **Flat design**: a new flat look throughout, with solid colours, no gradients or bevels, flat meters, buttons, knobs and dialogs.
+
 ## 0.6.0 - 2026-10-16
 
 - **Drop audio onto a track**: drop a file on a track to put it on that track (its audio in the take on screen is replaced; the old file stays in the session folder). Several files fill that track and the ones below; files dropped below the last track still become new tracks.

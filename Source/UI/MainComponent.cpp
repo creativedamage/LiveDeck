@@ -145,11 +145,26 @@ MainComponent::MainComponent()
     engine.log().post (Level::info, "LiveDeck ready. Choose Session > New Session to pick where audio is recorded.");
     setSize (1600, 940);
     startTimerHz (30);
+
+    // Licensing: every launch checks this computer's license (signed token, 14 days offline grace).
+   #if LIVEDECK_LICENSING
+    account = std::make_unique<AccountService> (*props.getUserSettings());
+    gate = std::make_unique<LicenseGate> (*account);
+    gate->onLicensed = [this] (const AccountService::Check& c) { licenseGranted (c); };
+    gate->onOpenAdmin = [this] { showAdminPanel(); };
+    addAndMakeVisible (*gate);
+    resized();
+    gate->start();
+   #else
+    licensed = true;
+   #endif
 }
 
 MainComponent::~MainComponent()
 {
     stopTimer();
+    gate.reset();
+    if (account != nullptr && licensed) account->release (true);   // frees this computer's seat right away
     if (importCancel) importCancel->store (true);
     remote.reset();
    #if JUCE_MAC
@@ -189,6 +204,7 @@ void MainComponent::resized()
 {
     auto r = getLocalBounds();
     if (menuBar != nullptr) menuBar->setBounds (r.removeFromTop (24));
+    if (gate != nullptr) { gate->setBounds (r); gate->toFront (false); }
     bar.setBounds (r.removeFromTop (TransportBar::kHeight));
     bridge.setVisible (showBridge);
     if (showBridge) bridge.setBounds (r.removeFromTop (patch.tracks.size() > 64 ? 92 : 64));
@@ -333,7 +349,7 @@ void MainComponent::refreshMonitorCombos()
 
 void MainComponent::startRecording()
 {
-    if (engine.isRecording()) return;
+    if (engine.isRecording() || ! licensed) return;
     if (importRunning && importCancel != nullptr)
     {
         // Recording always wins: an import competing for the disk is stopped (its partial files are removed).
@@ -406,6 +422,7 @@ void MainComponent::returnToZero()
 
 void MainComponent::startPlayback()
 {
+    if (! licensed) return;
     if (engine.isRecording()) return;
     if (session.primaryRoot == juce::File()) { alert ("Playback", "Open a session first (Session > Open Session).", false); return; }
     const int take = bar.takeCombo.getSelectedId();
@@ -491,7 +508,7 @@ void MainComponent::showViewMenu()
 
 juce::StringArray MainComponent::getMenuBarNames()
 {
-    return { "File", "Edit", "Transport", "Tracks", "Disks", "View", "Help" };
+    return { "File", "Edit", "Transport", "Tracks", "Disks", "View", "Account", "Help" };
 }
 
 static juce::PopupMenu::Item menuItem (const juce::String& text, const juce::String& shortcut, bool enabled, bool ticked,
@@ -589,7 +606,20 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Additional Audio Devices...", "", ! rec, false, [this] { showExtraDevices(); }));
             break;
 
-        case 6: // Help
+        case 6: // Account
+            if (account == nullptr) { m.addItem (menuItem ("Licensing is off in this build", "", false, false, nullptr)); break; }
+            m.addItem (menuItem (account->isSignedIn() ? "Signed in as " + account->email() : juce::String ("Not signed in"), "", false, false, nullptr));
+            m.addSeparator();
+            m.addItem (menuItem ("Account and License...", "", licensed, false, [this] { showAccountPanel(); }));
+            m.addItem (menuItem ("Edit Registration...", "", licensed, false, [this] { showRegistration(); }));
+            m.addItem (menuItem ("Change Password...", "", licensed, false, [this] { changePassword(); }));
+            if (account->lastCheck().isAdmin())
+                m.addItem (menuItem ("Admin Panel...", "", true, false, [this] { showAdminPanel(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Sign Out of This Computer", "", account->isSignedIn() && ! rec, false, [this] { signOutOfAccount(); }));
+            break;
+
+        case 7: // Help
             m.addItem (menuItem ("About LiveDeck", "", true, false, [this] { showAbout(); }));
             m.addItem (menuItem ("Check for Updates...", "", ! updateBusy, false, [this] { checkForUpdates (true); }));
             m.addItem (menuItem ("Check for Updates Automatically", "", true, autoUpdateCheck, [this]
@@ -692,6 +722,8 @@ void MainComponent::addMarker (const juce::String& requestedLabel)
 void MainComponent::timerCallback()
 {
     engine.housekeeping();
+    if (licensed && account != nullptr && juce::Time::getMillisecondCounterHiRes() - lastHeartbeatMs > AccountService::kHeartbeatMinutes * 60000.0)
+        heartbeat();
 
     for (int t = 0; t < (int) patch.tracks.size() && t < strips.size(); ++t)
     {
@@ -1674,6 +1706,7 @@ struct MainComponent::ImportJob
 
 void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t startFrame, int targetRow)
 {
+    if (! licensed) return;
     if (engine.isRecording()) { alert ("Import audio", "Stop recording before importing audio.", false); return; }
     if (importRunning) { alert ("Import audio", "An import is already running. Wait for it to finish.", false); return; }
 
@@ -1979,4 +2012,160 @@ void MainComponent::showClipMenu (int row, uint64_t frame)
         m.addItem ("Undo " + undoStack.back().label, ! rec, false, [this] { undo(); });
     }
     m.showMenuAsync (juce::PopupMenu::Options().withMousePosition());
+}
+
+// ------------------------------------------------------------------------------------ accounts + licensing
+
+void MainComponent::licenseGranted (const AccountService::Check& c)
+{
+    licensed = true;
+    lastHeartbeatMs = juce::Time::getMillisecondCounterHiRes();
+    if (gate != nullptr) gate->setVisible (false);
+    grabKeyboardFocus();
+    const auto& t = c.token;
+    if (c.status == "offline")
+        engine.log().post (Level::warning, "Offline: using the saved license (" + juce::String (license::daysLeft (t, juce::Time::currentTimeMillis()))
+                                               + " days left before LiveDeck needs to go online once).");
+    else
+        engine.log().post (Level::info, "Licensed to " + (t.company.isNotEmpty() ? t.company : t.email) + " (" + t.kind
+                                            + (t.expiresAt > 0 ? ", until " + juce::Time (t.expiresAt).formatted ("%d %b %Y") : juce::String()) + ")");
+    menuItemsChanged();
+}
+
+void MainComponent::heartbeat()
+{
+    lastHeartbeatMs = juce::Time::getMillisecondCounterHiRes();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    account->check ([safe] (const AccountService::Check& c)
+    {
+        if (safe == nullptr) return;
+        // Never interrupt a show: problems found while running are reported, and apply at the next launch.
+        juce::String warning;
+        if (c.status == "no_license") warning = "Your LiveDeck license is no longer active. LiveDeck keeps running now, but will ask for a license next time it starts.";
+        else if (c.status == "signed_out") warning = "You've been signed out of LiveDeck. Sign in again before the next launch.";
+        else if (c.status == "offline" && c.offlineVerdict != license::Verdict::ok) warning = license::describe (c.offlineVerdict);
+        if (warning.isNotEmpty() && warning != safe->lastLicenseWarning)
+        {
+            safe->lastLicenseWarning = warning;
+            safe->engine.log().post (Level::warning, warning);
+        }
+        safe->menuItemsChanged();
+    });
+}
+
+void MainComponent::showAccountPanel()
+{
+    if (account == nullptr) return;
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (new AccountPanel (*account,
+                                          [this] { signOutOfAccount(); },
+                                          [this] { showRegistration(); },
+                                          [this]
+                                          {
+                                              juce::PopupMenu m;
+                                              auto go = [this] (const juce::String& plan)
+                                              {
+                                                  account->checkout (plan, true, [this] (const juce::var& r)
+                                                  {
+                                                      if (r.getProperty ("status", {}).toString() == "ok") juce::URL (r["url"].toString()).launchInDefaultBrowser();
+                                                      else if (r.getProperty ("status", {}).toString() == "already_licensed") alert ("Buy or renew", "You already have a perpetual license.", false);
+                                                      else alert ("Buy or renew", r.getProperty ("message", "Checkout couldn't start.").toString(), true);
+                                                  });
+                                              };
+                                              m.addItem ("Annual license ($50 / year, 10% off for verified non-profits)", [go] { go ("annual"); });
+                                              m.addItem ("Perpetual license ($129, 10% off for verified non-profits)", [go] { go ("perpetual"); });
+                                              m.showMenuAsync (juce::PopupMenu::Options());
+                                          }));
+    o.dialogTitle = "LiveDeck Account";
+    o.dialogBackgroundColour = Theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = false;
+    o.componentToCentreAround = this;
+    o.launchAsync();
+}
+
+void MainComponent::showRegistration()
+{
+    if (account == nullptr) return;
+    auto* form = new RegistrationForm (*account, account->lastCheck().profile, true);
+    form->setSize (620, RegistrationForm::preferredHeight());
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::Component::SafePointer<RegistrationForm> f (form);
+    auto close = [f] { if (f != nullptr) if (auto* w = f->findParentComponentOfClass<juce::DialogWindow>()) w->exitModalState (0); };
+    form->onCancel = close;
+    form->onSaved = [safe, close]
+    {
+        close();
+        if (safe != nullptr) { safe->engine.log().post (Level::info, "Registration details saved"); safe->heartbeat(); }
+    };
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (form);
+    o.dialogTitle = "Registration";
+    o.dialogBackgroundColour = Theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.componentToCentreAround = this;
+    auto* w = o.launchAsync();
+    if (w != nullptr) w->setContentComponentSize (640, RegistrationForm::preferredHeight() + 20);
+}
+
+void MainComponent::showAdminPanel()
+{
+    if (account == nullptr) return;
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (new AdminPanel (*account));
+    o.dialogTitle = "LiveDeck Admin: users and licenses";
+    o.dialogBackgroundColour = Theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = true;
+    o.componentToCentreAround = this;
+    o.launchAsync();
+}
+
+void MainComponent::signOutOfAccount()
+{
+    if (account == nullptr || engine.isRecording()) return;
+    juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                      .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                      .withTitle ("Sign out of LiveDeck?")
+                                      .withMessage ("This frees this computer's place on your license. You'll need to sign in again to use LiveDeck here.")
+                                      .withButton ("Sign Out")
+                                      .withButton ("Cancel")
+                                      .withAssociatedComponent (this),
+                                  [this] (int result)
+                                  {
+                                      if (result != 1) return;
+                                      if (engine.isPlaying()) engine.stopPlayback();
+                                      licensed = false;
+                                      gate->setVisible (true);
+                                      resized();
+                                      account->signOut ([this] { gate->start(); menuItemsChanged(); });
+                                  });
+}
+
+void MainComponent::changePassword()
+{
+    if (account == nullptr) return;
+    textDialog = std::make_unique<juce::AlertWindow> ("Change password",
+                                                      "At least " + juce::String (AccountService::kMinPasswordLength) + " characters. "
+                                                      "(If you sign in with Google or Microsoft, this adds a password you can also use.)",
+                                                      juce::MessageBoxIconType::NoIcon, this);
+    textDialog->addTextEditor ("p1", {}, "New password", true);
+    textDialog->addTextEditor ("p2", {}, "Repeat new password", true);
+    textDialog->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    textDialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    textDialog->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int result)
+    {
+        const auto p1 = textDialog->getTextEditorContents ("p1"), p2 = textDialog->getTextEditorContents ("p2");
+        juce::MessageManager::callAsync ([this] { textDialog.reset(); });
+        if (result != 1) return;
+        if (p1.length() < AccountService::kMinPasswordLength) { alert ("Change password", "Use at least " + juce::String (AccountService::kMinPasswordLength) + " characters.", true); return; }
+        if (p1 != p2) { alert ("Change password", "The two passwords don't match.", true); return; }
+        account->setNewPassword (p1, [this] (bool ok, juce::String err)
+        {
+            alert ("Change password", ok ? juce::String ("Your password has been changed.") : err, ! ok);
+        });
+    }), false);
 }

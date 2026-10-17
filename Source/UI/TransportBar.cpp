@@ -54,9 +54,9 @@ void TransportBar::drawChip (juce::Graphics& g, juce::Rectangle<int>& row, const
     auto r = row.removeFromLeft (width).reduced (3, 0);
     row.removeFromLeft (2);
     g.setColour (Theme::strip);
-    g.fillRoundedRectangle (r.toFloat(), 4.0f);
+    g.fillRoundedRectangle (r.toFloat(), Theme::radius);
     g.setColour (c);
-    g.fillRoundedRectangle (r.removeFromLeft (4).toFloat(), 2.0f);
+    g.fillRect (r.removeFromLeft (3));
     r.removeFromLeft (4);
     g.setColour (Theme::textDim);
     g.setFont (Theme::ui (10.0f));
@@ -69,8 +69,6 @@ void TransportBar::drawChip (juce::Graphics& g, juce::Rectangle<int>& row, const
 void TransportBar::paint (juce::Graphics& g)
 {
     g.fillAll (Theme::panel);
-    g.setColour (Theme::edge);
-    g.drawHorizontalLine (getHeight() - 1, 0.0f, (float) getWidth());
 
     // timecode block
     auto t = timeArea;

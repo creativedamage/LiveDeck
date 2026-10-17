@@ -15,6 +15,8 @@
 #include "Core/AudioImport.h"
 #include "Core/Feedback.h"
 #include "Core/Player.h"
+#include "Core/License.h"
+#include "RsaTestVectors.h"
 
 #include <set>
 using namespace omr;
@@ -1132,6 +1134,55 @@ static void testClips()
     pl.halt();
 }
 
+static void testLicense()
+{
+    SECTION ("License: RSA token verification, offline grace, clock rollback, machine id, PKCE");
+    using namespace omr::license;
+    auto t = parse (kTestToken1, kTestN, kTestE);
+    CHECK (t.signatureOk);
+    CHECK (t.userId == "u1" && t.email == "a@b.c" && t.company == "Acme" && t.kind == "annual" && t.seats == 2);
+    CHECK (t.expiresAt == 2000000000000LL && t.validUntil == 1791209600000LL && ! t.admin);
+
+    const juce::int64 issued = 1790000000000LL;
+    CHECK (evaluate (t, "MACHINE-123456", issued + 3600000, issued) == Verdict::ok);
+    CHECK (evaluate (t, "OTHER-MACHINE", issued + 3600000, issued) == Verdict::wrongMachine);
+    CHECK (evaluate (t, "MACHINE-123456", 1791209600000LL + 1, issued) == Verdict::offlineGraceOver);
+    CHECK (evaluate (t, "MACHINE-123456", issued + 3600000, issued + 5 * 86400000LL) == Verdict::clockRolledBack);
+    CHECK (daysLeft (t, issued) == 13 || daysLeft (t, issued) == 14);
+
+    // tampering: change one character of the payload -> signature fails
+    juce::String bad (kTestToken1);
+    bad = bad.replaceSection (5, 1, bad[5] == 'A' ? "B" : "A");
+    CHECK (! parse (bad, kTestN, kTestE).signatureOk);
+    CHECK (evaluate (parse (bad, kTestN, kTestE), "MACHINE-123456", issued, issued) == Verdict::badSignature);
+    // wrong key (LiveDeck's real key) -> rejected
+    CHECK (! parse (kTestToken1).signatureOk);
+    CHECK (! parse ("garbage").signatureOk && ! parse ("").signatureOk);
+
+    auto p = parse (kTestToken2, kTestN, kTestE);
+    CHECK (p.signatureOk && p.kind == "perpetual" && p.expiresAt == 0 && p.admin);
+    CHECK (evaluate (p, "MACHINE-123456", issued + 3600000, 0) == Verdict::ok);   // perpetual: no expiry
+
+    // real public key decodes to 2048 bits
+    CHECK (base64UrlDecode (kPublicKeyN).getSize() == 256 && base64UrlDecode (kPublicKeyE).getSize() == 3);
+
+    // base64url round trip
+    const char raw[] = "\xfb\xff\x00\x10hello";
+    const auto enc = base64UrlEncode (raw, sizeof (raw) - 1);
+    CHECK (! enc.containsAnyOf ("+/="));
+    CHECK (base64UrlDecode (enc) == juce::MemoryBlock (raw, sizeof (raw) - 1));
+
+    // machine id: stable, hex, not the raw device id
+    CHECK (machineId() == machineId() && machineId().length() == 40 && machineId().containsOnly ("0123456789abcdef"));
+
+    // PKCE (RFC 7636 appendix B example)
+    CHECK (codeChallengeS256 ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    juce::Random rng (42);
+    const auto v = makeCodeVerifier (rng);
+    CHECK (v.length() == 64 && v.containsOnly ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"));
+    CHECK (formatPrice (5000) == "$50.00" && formatPrice (11610) == "$116.10" && formatPrice (4500) == "$45.00");
+}
+
 int main (int argc, char** argv)
 {
 
@@ -1155,6 +1206,7 @@ int main (int argc, char** argv)
     testFailedTarget();
     testImport();
     testClips();
+    testLicense();
     testFeedback();
     testLibrary();
     testBenchmark();
