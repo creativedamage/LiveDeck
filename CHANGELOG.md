@@ -5,6 +5,8 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-17
+
 - **LiveDeck accounts and licenses**: sign in with email and password (with email confirmation, Forgot Password and Change Password) or with Google or Microsoft, register your organization, and buy an annual ($50/year) or perpetual ($129) license through Stripe. Verified non-profits get 10% off and no sales tax.
 - Each license runs on 2 computers at a time on the same network. LiveDeck checks the license at every launch and can start offline for up to 14 days. It never locks during a show.
 - **Account menu**: Account and License, Edit Registration, Sign Out. Admins also get an Admin Panel to verify non-profits and to create, revoke or extend licenses.
