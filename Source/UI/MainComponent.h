@@ -133,7 +133,15 @@ private:
     juce::String systemInfo() const;
 
     // drag-and-drop audio import (new tracks in the shown take)
-    void importAudioFiles (const juce::StringArray& paths, uint64_t startFrame);
+    void importAudioFiles (const juce::StringArray& paths, uint64_t startFrame, int targetRow = -1);
+    // clip editing in the shown take (manifest only; files are never touched) + undo
+    void moveClipTo (int fromRow, int toRow, uint64_t offset);
+    void showClipMenu (int row, uint64_t frame);
+    void clipsChanged (int take);   // take length + timeline after a clip edit
+    struct UndoStep { juce::File root; int take = 0; juce::String manifestBefore, label; std::vector<int> createdTrackIds; };
+    std::vector<UndoStep> undoStack;
+    void pushUndo (int take, const juce::String& label, std::vector<int> createdTrackIds = {});
+    void undo();
     struct ImportJob;
     void finishImport (std::shared_ptr<ImportJob> job);
     std::shared_ptr<std::atomic<bool>> importCancel;

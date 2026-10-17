@@ -15,6 +15,18 @@ namespace omr
 // Takes found in a session folder: take number -> (track index -> file). Primary files only.
 std::map<int, std::map<int, juce::File>> scanTakes (const juce::File& sessionRoot);
 
+// One track's audio in a take: a file that starts `offset` frames after the start of the take
+// (recorded files start at 0; dropped / moved files can start later).
+struct Clip
+{
+    juce::File file;
+    uint64_t offset = 0;
+    juce::String name;   // what to show on the clip: the imported file's name, else the file's own name
+};
+
+// Clips of a take mapped to the CURRENT rows of `patch` (via the manifest's track ids).
+std::map<int, Clip> resolveTakeClips (const juce::File& sessionRoot, int take, const PatchState& patch);
+
 // Files of a take mapped to the CURRENT rows of `patch`: uses the take manifest (track ids),
 // so reordered/deleted tracks keep their own audio. Takes without a manifest map by position.
 std::map<int, juce::File> resolveTakeFiles (const juce::File& sessionRoot, int take, const PatchState& patch);
@@ -24,11 +36,23 @@ std::map<int, juce::File> resolveTakeFiles (const juce::File& sessionRoot, int t
 bool writeManifestIfMissing (const juce::File& sessionRoot, int take, const PatchState& patch);
 
 // Adds files to a take's manifest (creating it if needed). Used by audio import.
-struct ManifestEntry { int id = 0, row = 0, channels = 1; juce::String name; juce::File file; };
+struct ManifestEntry { int id = 0, row = 0, channels = 1; juce::String name; juce::File file; uint64_t offset = 0; juce::String source; };
 bool appendToManifest (const juce::File& sessionRoot, int take, const std::vector<ManifestEntry>& entries);
 
-// Length of a take in frames: the longest of its files.
+// Clip editing (message thread). All edits only rewrite the small take manifest: audio files are never
+// changed or deleted, so every edit can be undone by restoring the previous manifest text.
+juce::String readManifestText (const juce::File& sessionRoot, int take);            // "" if none
+bool restoreManifestText (const juce::File& sessionRoot, int take, const juce::String& text);   // "" deletes it
+// Puts `e` on track e.id, replacing whatever that track had in this take.
+bool setClip (const juce::File& sessionRoot, int take, const ManifestEntry& e);
+// Moves track fromId's clip to track toId at newOffset. If toId already has a clip: swap = it moves
+// to fromId (keeping its own offset), otherwise it is unlinked from the take.
+bool moveClip (const juce::File& sessionRoot, int take, int fromId, int toId, uint64_t newOffset, bool swap);
+bool removeClip (const juce::File& sessionRoot, int take, int trackId);   // unlinks; the file stays on disk
+
+// Length of a take in frames: the end of its last clip.
 uint64_t takeLength (const std::map<int, juce::File>& files);
+uint64_t takeLength (const std::map<int, Clip>& clips);
 
 class Player : private juce::Thread
 {
@@ -39,6 +63,7 @@ public:
     // Control thread. Opens every file of the take, pre-fills the rings from `startFrame`.
     juce::Result load (const juce::File& sessionRoot, int take, double deviceSampleRate, uint64_t startFrame); // files by position
     juce::Result load (const std::map<int, juce::File>& filesByRow, int take, double deviceSampleRate, uint64_t startFrame);
+    juce::Result load (const std::map<int, Clip>& clipsByRow, int take, double deviceSampleRate, uint64_t startFrame);
     void start();      // begins streaming; call after load()
     void halt();       // stops the reader thread
 
@@ -67,8 +92,9 @@ private:
         std::unique_ptr<juce::AudioFormatReader> reader;
         std::unique_ptr<SpscRing<float>> ring;
         juce::AudioBuffer<float> chunk;
-        uint64_t readPos = 0;   // next frame to read from the file
-        uint64_t length = 0;
+        uint64_t readPos = 0;   // next take frame to stream (frames before `offset` are silence)
+        uint64_t offset = 0;    // where the file starts in the take
+        uint64_t length = 0;    // offset + file length
         uint64_t owed = 0;      // audio thread: frames lost to an underrun, skipped on the next read to stay aligned
     };
 

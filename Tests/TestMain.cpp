@@ -1061,6 +1061,77 @@ static void testLibrary()
     Library::setRootForTesting ({});
 }
 
+static void testClips()
+{
+    SECTION ("Clips: offsets, move between tracks, swap/replace, remove, undo text, offset playback");
+    const auto root = tempDir ("clips");
+    SessionPaths::createTree (root);
+    auto dest = [&] (const juce::String& n) { return SessionPaths::audioDir (root).getChildFile (n); };
+    const auto a = writeTestWav (dest ("T01_A_001.wav"), 48000, 1, 2000, [] (int, int i) { return 0.001f * (float) (i + 1); });
+    const auto b = writeTestWav (dest ("T02_B_001.wav"), 48000, 1, 3000, [] (int, int) { return -0.5f; });
+
+    PatchState p;
+    setDeviceChannels (p, { "1", "2", "3" }, { "1", "2", "3" });
+    addTracks (p, 3, 0, false, false);
+    const int id0 = p.tracks[0].id, id1 = p.tracks[1].id, id2 = p.tracks[2].id;
+    CHECK (appendToManifest (root, 1, { { id0, 0, 1, "A", a, 0 }, { id1, 1, 1, "B", b, 0 } }));
+
+    // move A later on the same track
+    const auto before = readManifestText (root, 1);
+    CHECK (moveClip (root, 1, id0, id0, 4800, false));
+    auto c = resolveTakeClips (root, 1, p);
+    CHECK (c.size() == 2 && c[0].offset == 4800 && c[0].file == a);
+    CHECK (takeLength (c) == 4800 + 2000);
+
+    // move A to the empty track 3
+    CHECK (moveClip (root, 1, id0, id2, 100, false));
+    c = resolveTakeClips (root, 1, p);
+    CHECK (c.count (0) == 0 && c[2].file == a && c[2].offset == 100 && c[1].file == b);
+
+    // swap A (track 3) with B (track 2): B keeps its own offset
+    CHECK (moveClip (root, 1, id2, id1, 50, true));
+    c = resolveTakeClips (root, 1, p);
+    CHECK (c[1].file == a && c[1].offset == 50 && c[2].file == b && c[2].offset == 0);
+
+    // replace: B (track 3) onto track 2 unlinks A
+    CHECK (moveClip (root, 1, id2, id1, 0, false));
+    c = resolveTakeClips (root, 1, p);
+    CHECK (c.size() == 1 && c[1].file == b);
+    CHECK (a.existsAsFile());   // never deleted
+
+    // setClip puts a file on a track (replacing), removeClip unlinks
+    CHECK (setClip (root, 1, { id0, 0, 1, "A", a, 960 }));
+    c = resolveTakeClips (root, 1, p);
+    CHECK (c[0].file == a && c[0].offset == 960);
+    CHECK (removeClip (root, 1, id1));
+    CHECK (resolveTakeClips (root, 1, p).count (1) == 0);
+
+    // undo = restore the earlier manifest text
+    CHECK (restoreManifestText (root, 1, before));
+    c = resolveTakeClips (root, 1, p);
+    CHECK (c.size() == 2 && c[0].offset == 0 && c[0].file == a && c[1].file == b);
+
+    // playback: a clip starting at 1000 plays silence first, then the file from its first sample
+    std::map<int, Clip> clips { { 0, { a, 1000 } } };
+    EventLog log;
+    Player pl (log);
+    CHECK (pl.load (clips, 1, 48000, 0).wasOk());
+    CHECK (pl.length() == 3000);
+    pl.start();
+    juce::Thread::sleep (150);
+    std::vector<float> L (1500), R (1500);
+    CHECK (pl.readTrack (0, L.data(), R.data(), 1500, 0) == 1);
+    CHECK (std::abs (L[999]) < 1.0e-6f && std::abs (L[1000] - 0.001f) < 1.0e-4f && std::abs (L[1499] - 0.5f) < 1.0e-3f);
+    pl.halt();
+    // seek into the clip
+    CHECK (pl.load (clips, 1, 48000, 1500).wasOk());
+    pl.start();
+    juce::Thread::sleep (150);
+    pl.readTrack (0, L.data(), R.data(), 10, 1500);
+    CHECK (std::abs (L[0] - 0.501f) < 1.0e-3f);
+    pl.halt();
+}
+
 int main (int argc, char** argv)
 {
 
@@ -1083,6 +1154,7 @@ int main (int argc, char** argv)
     testMultiDevice();
     testFailedTarget();
     testImport();
+    testClips();
     testFeedback();
     testLibrary();
     testBenchmark();

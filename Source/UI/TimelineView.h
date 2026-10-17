@@ -21,7 +21,8 @@ public:
     // ---- model (message thread)
     void setTracks (const std::vector<omr::TrackState>& tracks, bool recording, const std::set<int>& selectedIds = {});
     void startRename (int row);                  // inline name editor; Tab / Shift+Tab move to the next / previous track
-    void setPeaks (int track, std::shared_ptr<omr::PeakStore> store);
+    // A track's audio in the shown take: waveform, where it starts in the take, and its name.
+    void setPeaks (int track, std::shared_ptr<omr::PeakStore> store, uint64_t offset = 0, const juce::String& clipName = {});
     void clearPeaks();
     void setSampleRate (double sr);
     void setLength (uint64_t frames);           // take length (grows while recording)
@@ -42,7 +43,11 @@ public:
     std::function<void (int insertBefore)> onMoveSelected;        // header drag-and-drop finished
     std::function<void (int row, const juce::String&)> onRename;
     // Audio files / folders dropped on the timeline; `frame` = where they should start (0 near the left edge).
-    std::function<void (const juce::StringArray& files, uint64_t frame)> onFilesDropped;
+    // `row` = the track dropped on (its audio is replaced, extra files fill the tracks below), -1 = new tracks.
+    std::function<void (const juce::StringArray& files, uint64_t frame, int row)> onFilesDropped;
+    // Clip editing: drag a clip by its name bar (or Alt-drag anywhere on it) to move it in time or to another track.
+    std::function<void (int fromRow, int toRow, uint64_t newOffset)> onClipMoved;
+    std::function<void (int row, uint64_t frameAtClick)> onClipMenu;   // right-click on a clip
     std::function<bool()> canAcceptDrop;                 // false while recording
     void setBusyText (const juce::String& text);         // "Importing 3 of 12..." overlay; empty hides it
 
@@ -71,6 +76,8 @@ private:
         bool armed = false, mute = false, solo = false, hasInput = false, stereo = false, selected = false;
         int paletteIndex = -1;
         std::shared_ptr<omr::PeakStore> peaks;
+        uint64_t clipOffset = 0;
+        juce::String clipName;
     };
 
     void scrollBarMoved (juce::ScrollBar*, double) override;
@@ -118,7 +125,17 @@ private:
 
     // file drop
     bool fileHover = false;
-    int fileHoverX = 0;
+    int fileHoverX = 0, fileHoverY = 0;
+    int dropRowForY (int y) const;   // row under y, -1 below the last track
+
+    // clip drag
+    juce::Rectangle<float> clipBounds (int row) const;     // the clip's rectangle in this row's lane
+    bool hitClipHandle (juce::Point<int> p, int& row) const;
+    bool hitClip (juce::Point<int> p, int& row) const;
+    struct ClipDrag { int fromRow = -1, toRow = -1, pressX = 0; uint64_t origOffset = 0, newOffset = 0; bool moved = false; } clipDrag;
+    uint64_t snapOffset (uint64_t off, int ignoreRow) const;
+    void paintClipGhost (juce::Graphics&);
+    static constexpr int kClipBarH = 13;
     juce::String busyText;
     uint64_t dropFrameForX (int x) const;
     void paintDropOverlay (juce::Graphics&);

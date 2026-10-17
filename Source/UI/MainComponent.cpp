@@ -105,7 +105,9 @@ MainComponent::MainComponent()
     timeline.onTrackMenu = [this] (int row) { showTrackMenu (row); };
     timeline.onMoveSelected = [this] (int insertBefore) { moveSelectedTo (insertBefore); };
     timeline.onRename = [this] (int row, const juce::String& n) { applyPatch ([row, n] (PatchState& p) { return renameTrack (p, row, n); }); };
-    timeline.onFilesDropped = [this] (const juce::StringArray& files, uint64_t frame) { importAudioFiles (files, frame); };
+    timeline.onFilesDropped = [this] (const juce::StringArray& files, uint64_t frame, int row) { importAudioFiles (files, frame, row); };
+    timeline.onClipMoved = [this] (int fromRow, int toRow, uint64_t offset) { moveClipTo (fromRow, toRow, offset); };
+    timeline.onClipMenu = [this] (int row, uint64_t frame) { showClipMenu (row, frame); };
     timeline.canAcceptDrop = [this] { return ! engine.isRecording(); };
 
     stripDropMarker.setOpaque (true);
@@ -411,7 +413,7 @@ void MainComponent::startPlayback()
     if (audio.getDeviceManager().getCurrentAudioDevice() == nullptr) { alert ("Playback", "Choose an output device in Audio Setup first.", true); return; }
     const auto len = takeLengths.count (take) ? takeLengths[take] : 0;
     if (cueFrames >= len) cueFrames = 0;
-    if (auto r = engine.startPlayback (resolveTakeFiles (session.primaryRoot, take, patch), take, cueFrames); r.failed())
+    if (auto r = engine.startPlayback (resolveTakeClips (session.primaryRoot, take, patch), take, cueFrames); r.failed())
         alert ("Cannot play take " + juce::String (take), r.getErrorMessage(), true);
     else timeline.setFollow (true);
 }
@@ -429,7 +431,7 @@ void MainComponent::refreshTakes (bool selectNewest)
 
     for (const auto& [take, files] : scanTakes (session.primaryRoot))
     {
-        const uint64_t len = takeLength (files);   // the longest file (imported files can be longer)
+        const uint64_t len = takeLength (resolveTakeClips (session.primaryRoot, take, patch));   // end of the last clip
         takeLengths[take] = len;
         const double secs = (double) len / juce::jmax (1.0, engine.sampleRate());
         bar.takeCombo.addItem ("Take " + juce::String (take) + "  (" + juce::String ((int) files.size()) + " tr, "
@@ -451,8 +453,8 @@ void MainComponent::refreshTimeline (bool fit)
     timeline.clearPeaks();
     if (take > 0 && session.primaryRoot != juce::File())
     {
-        for (const auto& [row, file] : resolveTakeFiles (session.primaryRoot, take, patch))
-            timeline.setPeaks (row, waveforms.get (file));
+        for (const auto& [row, clip] : resolveTakeClips (session.primaryRoot, take, patch))
+            timeline.setPeaks (row, waveforms.get (clip.file), clip.offset, clip.name);
     }
     timeline.setLength (takeLengths.count (take) ? takeLengths[take] : 0);
     timeline.setMarkers (loadMarkers (take));
@@ -489,7 +491,7 @@ void MainComponent::showViewMenu()
 
 juce::StringArray MainComponent::getMenuBarNames()
 {
-    return { "File", "Transport", "Tracks", "Disks", "View", "Help" };
+    return { "File", "Edit", "Transport", "Tracks", "Disks", "View", "Help" };
 }
 
 static juce::PopupMenu::Item menuItem (const juce::String& text, const juce::String& shortcut, bool enabled, bool ticked,
@@ -535,7 +537,12 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Reveal LiveDeck Folder", "", true, false, [this] { revealLibrary(); }));
             break;
 
-        case 1: // Transport
+        case 1: // Edit
+            m.addItem (menuItem (undoStack.empty() ? juce::String ("Undo") : "Undo " + undoStack.back().label, cmd + "Z",
+                                 ! rec && ! undoStack.empty(), false, [this] { undo(); }));
+            break;
+
+        case 2: // Transport
             m.addItem (menuItem ("Record", cmd + "R", ! rec, false, [this] { startRecording(); }));
             m.addItem (menuItem (engine.isPlaying() ? "Stop Playback" : "Play", "Space", ! rec, false,
                                  [this] { if (engine.isPlaying()) stopTransport(); else startPlayback(); }));
@@ -546,7 +553,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Remote Control (OSC / MIDI)...", "", true, false, [this] { showRemoteSettings(); }));
             break;
 
-        case 2: // Tracks
+        case 3: // Tracks
             m.addItem (menuItem ("Add Track", "", ! rec, false, [this] { applyPatch ([this] (PatchState& p) { return addTrack (p, engine.isRecording()); }); }));
             m.addItem (menuItem ("Add Multiple Tracks...", "", ! rec, false, [this] { showAddTracksDialog(); }));
             m.addSeparator();
@@ -560,7 +567,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             }));
             break;
 
-        case 3: // Disks
+        case 4: // Disks
             m.addItem (menuItem ("Change Primary Folder (Disk A)...", "", ! rec, false, [this] { newSession (session.name); }));
             m.addItem (menuItem ("Set Redundant Folder (Disk B)...", "", ! rec, false, [this] { chooseSecondary(); }));
             m.addItem (menuItem ("Remove Disk B", "", ! rec && session.secondaryRoot != juce::File(), false,
@@ -569,7 +576,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Benchmark Disks", "", ! rec && ! benchmarkRunning && hasSession, false, [this] { runBenchmark(); }));
             break;
 
-        case 4: // View
+        case 5: // View
             m.addItem (menuItem ("Show Mixer", "", true, showMixer, [this] { showMixer = ! showMixer; props.getUserSettings()->setValue ("showMixer", showMixer); resized(); }));
             m.addItem (menuItem ("Show Meter Bridge", "", true, showBridge, [this] { showBridge = ! showBridge; props.getUserSettings()->setValue ("showBridge", showBridge); resized(); }));
             m.addItem (menuItem ("Show Event Console", "", true, showConsole, [this] { showConsole = ! showConsole; props.getUserSettings()->setValue ("showConsole", showConsole); resized(); }));
@@ -582,7 +589,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Additional Audio Devices...", "", ! rec, false, [this] { showExtraDevices(); }));
             break;
 
-        case 5: // Help
+        case 6: // Help
             m.addItem (menuItem ("About LiveDeck", "", true, false, [this] { showAbout(); }));
             m.addItem (menuItem ("Check for Updates...", "", ! updateBusy, false, [this] { checkForUpdates (true); }));
             m.addItem (menuItem ("Check for Updates Automatically", "", true, autoUpdateCheck, [this]
@@ -624,13 +631,15 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
     const auto mods = k.getModifiers();
     if (mods.isCommandDown())
     {
-        const auto c = juce::CharacterFunctions::toLowerCase (k.getTextCharacter() != 0 ? k.getTextCharacter() : (juce::juce_wchar) k.getKeyCode());
+        // Ctrl+letter can arrive as a control character (Windows / Linux): use the key code then.
+        const auto c = juce::CharacterFunctions::toLowerCase (k.getTextCharacter() >= 32 ? k.getTextCharacter() : (juce::juce_wchar) k.getKeyCode());
         switch (c)
         {
             case 'n': if (! engine.isRecording()) newSession ("Show"); return true;
             case 'o': if (! engine.isRecording()) openSession(); return true;
             case 's': saveSession(); return true;
             case 'r': startRecording(); return true;
+            case 'z': undo(); return true;
             case '.': stopTransport(); return true;
             case '=': case '+': timeline.zoomBy (1.0 / 1.6); return true;
             case '-': timeline.zoomBy (1.6); return true;
@@ -1653,6 +1662,7 @@ struct MainComponent::ImportJob
 {
     ImportPlan plan;
     std::vector<std::vector<juce::File>> destinations;   // per source, per output
+    std::vector<std::vector<int>> targetIds;             // per source, per output: existing track id, 0 = new track
     std::vector<ImportResult> results;
     juce::File root;
     int take = 0;
@@ -1662,7 +1672,7 @@ struct MainComponent::ImportJob
     uint64_t startFrame = 0;
 };
 
-void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t startFrame)
+void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t startFrame, int targetRow)
 {
     if (engine.isRecording()) { alert ("Import audio", "Stop recording before importing audio.", false); return; }
     if (importRunning) { alert ("Import audio", "An import is already running. Wait for it to finish.", false); return; }
@@ -1673,7 +1683,7 @@ void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t s
         const juce::File first (paths[0]);
         auto name = first.isDirectory() ? first.getFileName() : first.getParentDirectory().getFileName();
         if (name.isEmpty()) name = "Show";
-        newSession (name, [this, paths, startFrame] { importAudioFiles (paths, startFrame); });
+        newSession (name, [this, paths, startFrame] { importAudioFiles (paths, startFrame, -1); });
         return;
     }
 
@@ -1684,7 +1694,21 @@ void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t s
         alert ("Import audio", "Nothing to import.\n\n" + job->plan.skipped.joinIntoString ("\n"), true);
         return;
     }
-    const int newTracks = job->plan.numTracks();
+
+    // Dropped on a track: the first file goes to that track, the next ones to the tracks below it;
+    // whatever doesn't fit becomes new tracks. Dropped below the tracks: all new tracks.
+    int nextRow = targetRow >= 0 && targetRow < (int) patch.tracks.size() ? targetRow : -1;
+    int newTracks = 0;
+    for (const auto& src : job->plan.sources)
+    {
+        std::vector<int> ids;
+        for (size_t k = 0; k < src.outputs.size(); ++k)
+        {
+            if (nextRow >= 0 && nextRow < (int) patch.tracks.size()) ids.push_back (patch.tracks[(size_t) nextRow++].id);
+            else { ids.push_back (0); ++newTracks; }
+        }
+        job->targetIds.push_back (std::move (ids));
+    }
     if ((int) patch.tracks.size() + newTracks > kMaxTracks)
     {
         alert ("Import audio", juce::String (newTracks) + " new tracks would exceed the limit of " + juce::String (kMaxTracks) + " tracks.", true);
@@ -1702,22 +1726,24 @@ void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t s
     job->startFrame = startFrame;
 
     // File names follow the recorded ones (T<row>_<name>_<take>.wav) so the take scanner finds them;
-    // the take manifest is what ties each file to its track.
+    // the take manifest is what ties each file to its track (and stores where it starts).
     SessionPaths::audioDir (job->root).createDirectory();
-    int row = (int) patch.tracks.size();
+    int newRow = (int) patch.tracks.size();
     std::set<juce::String> used;
-    for (const auto& src : job->plan.sources)
+    for (size_t i = 0; i < job->plan.sources.size(); ++i)
     {
+        const auto& src = job->plan.sources[i];
         std::vector<juce::File> d;
-        for (const auto& out : src.outputs)
+        for (size_t k = 0; k < src.outputs.size(); ++k)
         {
-            auto name = out.trackName;
+            const int id = job->targetIds[i][k];
+            const int row = id > 0 ? rowForTrackId (patch, id) : newRow++;
+            const auto name = id > 0 ? patch.tracks[(size_t) row].name : src.outputs[k].trackName;
             auto f = SessionPaths::audioDir (job->root).getChildFile (SessionPaths::trackFileName (row, name, job->take, false));
             for (int n = 2; f.exists() || used.count (f.getFileName()) > 0; ++n)
                 f = SessionPaths::audioDir (job->root).getChildFile (SessionPaths::trackFileName (row, name + "_" + juce::String (n), job->take, false));
             used.insert (f.getFileName());
             d.push_back (f);
-            ++row;
         }
         job->destinations.push_back (std::move (d));
     }
@@ -1725,8 +1751,8 @@ void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t s
     importRunning = true;
     importCancel = std::make_shared<std::atomic<bool>> (false);
     const auto cancel = importCancel;
-    engine.log().post (Level::info, "Importing " + juce::String ((int) job->plan.sources.size()) + " file(s) as " + juce::String (newTracks)
-                                        + " track(s) into take " + juce::String (job->take)
+    engine.log().post (Level::info, "Importing " + juce::String ((int) job->plan.sources.size()) + " file(s) into take " + juce::String (job->take)
+                                        + (targetRow >= 0 ? " on track " + juce::String (targetRow + 1) : juce::String())
                                         + (std::abs (job->rate - job->plan.sources.front().sampleRate) > 0.5 ? " (converting the sample rate)" : ""));
     timeline.setBusyText ("Importing audio...");
 
@@ -1748,8 +1774,9 @@ void MainComponent::importAudioFiles (const juce::StringArray& paths, uint64_t s
                                   + src.file.getFileName() + "  " + juce::String (juce::roundToInt (p * 100)) + "%";
                 juce::MessageManager::callAsync ([safe, text] { if (safe != nullptr) safe->timeline.setBusyText (text); });
             };
-            job->results.push_back (importSource (src, job->destinations[(size_t) i], job->rate, job->bits,
-                                                  (int64_t) job->startFrame, cancel.get(), progress));
+            // Files are written from their first sample; where they start in the take lives in the manifest,
+            // so they can be moved later without rewriting audio.
+            job->results.push_back (importSource (src, job->destinations[(size_t) i], job->rate, job->bits, 0, cancel.get(), progress));
         }
         juce::MessageManager::callAsync ([safe, job] { if (safe != nullptr) safe->finishImport (job); });
     });
@@ -1762,51 +1789,7 @@ void MainComponent::finishImport (std::shared_ptr<ImportJob> job)
     const bool cancelled = importCancel != nullptr && importCancel->load();
     importCancel.reset();
 
-    juce::StringArray problems = job->plan.skipped;
-    int filesOk = 0, tracksAdded = 0;
-
-    if (! cancelled && ! engine.isRecording() && session.primaryRoot == job->root)
-    {
-        // Existing takes from before manifests: link their files to the current tracks first.
-        writeManifestIfMissing (job->root, job->take, patch);
-
-        std::vector<ManifestEntry> entries;
-        PatchState p = patch;
-        for (size_t i = 0; i < job->results.size(); ++i)
-        {
-            const auto& r = job->results[i];
-            const auto& src = job->plan.sources[i];
-            if (! r.ok) { problems.add (src.file.getFileName() + ": " + r.error); continue; }
-            ++filesOk;
-            for (size_t k = 0; k < src.outputs.size() && k < r.written.size(); ++k)
-            {
-                const auto& out = src.outputs[k];
-                int id = 0;
-                const bool stereo = out.sourceChannels.size() == 2;
-                if (addNamedTrack (p, out.trackName, stereo, false, &id).failed())
-                {
-                    problems.add (out.trackName + ": track limit reached");
-                    r.written[k].deleteFile();
-                    continue;
-                }
-                entries.push_back ({ id, (int) p.tracks.size() - 1, stereo ? 2 : 1, out.trackName, r.written[k] });
-                ++tracksAdded;
-            }
-        }
-
-        if (! entries.empty())
-        {
-            appendToManifest (job->root, job->take, entries);
-            applyPatch ([p] (PatchState& s) { s = p; return juce::Result::ok(); });
-            if (job->newTake) session.nextTake = job->take + 1;
-            saveSession();
-            refreshTakes (job->newTake);
-            if (! job->newTake) { bar.takeCombo.setSelectedId (job->take, juce::dontSendNotification); refreshTimeline (true); }
-            engine.log().post (Level::info, "Imported " + juce::String (filesOk) + " file(s) as " + juce::String (tracksAdded)
-                                                + " track(s) into take " + juce::String (job->take));
-        }
-    }
-    else
+    if (cancelled || engine.isRecording() || session.primaryRoot != job->root)
     {
         // Cancelled (or the session changed): remove whatever was written.
         for (const auto& r : job->results) for (const auto& f : r.written) f.deleteFile();
@@ -1814,8 +1797,186 @@ void MainComponent::finishImport (std::shared_ptr<ImportJob> job)
         return;
     }
 
+    juce::StringArray problems = job->plan.skipped;
+    int filesOk = 0, replaced = 0, added = 0;
+
+    // Existing takes from before manifests: link their files to the current tracks first.
+    writeManifestIfMissing (job->root, job->take, patch);
+    const auto before = readManifestText (job->root, job->take);
+    const auto existing = resolveTakeClips (job->root, job->take, patch);
+
+    std::vector<ManifestEntry> newEntries;
+    std::vector<int> createdIds;
+    PatchState p = patch;
+    for (size_t i = 0; i < job->results.size(); ++i)
+    {
+        const auto& r = job->results[i];
+        const auto& src = job->plan.sources[i];
+        if (! r.ok) { problems.add (src.file.getFileName() + ": " + r.error); continue; }
+        ++filesOk;
+        for (size_t k = 0; k < src.outputs.size() && k < r.written.size(); ++k)
+        {
+            const auto& out = src.outputs[k];
+            const int channels = (int) out.sourceChannels.size();
+            int id = job->targetIds[i][k];
+            int row = id > 0 ? rowForTrackId (p, id) : -1;
+            if (row >= 0)
+            {
+                // onto an existing track: replaces what that track had in this take (the old file stays on disk)
+                if (existing.count (row) > 0) ++replaced;
+                setClip (job->root, job->take, { id, row, channels, p.tracks[(size_t) row].name, r.written[k], job->startFrame, out.trackName });
+                continue;
+            }
+            if (addNamedTrack (p, out.trackName, channels == 2, false, &id).failed())
+            {
+                problems.add (out.trackName + ": track limit reached");
+                r.written[k].deleteFile();
+                continue;
+            }
+            createdIds.push_back (id);
+            newEntries.push_back ({ id, (int) p.tracks.size() - 1, channels, out.trackName, r.written[k], job->startFrame, out.trackName });
+            ++added;
+        }
+    }
+
+    if (! newEntries.empty()) appendToManifest (job->root, job->take, newEntries);
+    if (readManifestText (job->root, job->take) != before)
+    {
+        undoStack.push_back ({ job->root, job->take, before, "Import Audio", createdIds });
+        if (undoStack.size() > 50) undoStack.erase (undoStack.begin());
+    }
+    if (! createdIds.empty()) applyPatch ([p] (PatchState& s) { s = p; return juce::Result::ok(); });
+    if (job->newTake) session.nextTake = job->take + 1;
+    saveSession();
+    refreshTakes (job->newTake);
+    if (! job->newTake) { bar.takeCombo.setSelectedId (job->take, juce::dontSendNotification); clipsChanged (job->take); }
+    menuItemsChanged();
+
+    juce::String summary = "Imported " + juce::String (filesOk) + " file(s) into take " + juce::String (job->take) + ": ";
+    juce::StringArray parts;
+    if (added > 0) parts.add (juce::String (added) + " new track(s)");
+    const int onExisting = [&] { int n = 0; for (const auto& v : job->targetIds) for (int id : v) if (id > 0) ++n; return n; }();
+    if (onExisting > 0) parts.add (juce::String (onExisting) + " on existing track(s)" + (replaced > 0 ? " (" + juce::String (replaced) + " replaced, Cmd+Z undoes)" : juce::String()));
+    engine.log().post (Level::info, summary + parts.joinIntoString (", "));
+
     if (! problems.isEmpty())
-        alert ("Import audio", (tracksAdded > 0 ? "Imported " + juce::String (tracksAdded) + " track(s). " : juce::String())
-                                   + "Some files were not imported:\n\n" + problems.joinIntoString ("\n"),
-               tracksAdded == 0);
+        alert ("Import audio", "Some files were not imported:\n\n" + problems.joinIntoString ("\n"), filesOk == 0);
+}
+
+// ------------------------------------------------------------------------------------ clip editing + undo
+
+void MainComponent::pushUndo (int take, const juce::String& label, std::vector<int> createdTrackIds)
+{
+    undoStack.push_back ({ session.primaryRoot, take, readManifestText (session.primaryRoot, take), label, std::move (createdTrackIds) });
+    if (undoStack.size() > 50) undoStack.erase (undoStack.begin());
+    menuItemsChanged();
+}
+
+void MainComponent::undo()
+{
+    if (engine.isRecording() || undoStack.empty()) return;
+    const auto step = undoStack.back();
+    undoStack.pop_back();
+    if (step.root != session.primaryRoot) { undoStack.clear(); menuItemsChanged(); return; }   // another session
+    stopPlaybackForEdit();
+    // No manifest before = nothing was linked yet: an empty one keeps the take's files from being
+    // mapped to tracks by file name again.
+    restoreManifestText (step.root, step.take, step.manifestBefore.isNotEmpty() ? step.manifestBefore
+                                                                                : "{\"take\": " + juce::String (step.take) + ", \"tracks\": []}");
+    if (! step.createdTrackIds.empty())
+    {
+        std::vector<int> rows;
+        for (int id : step.createdTrackIds) if (const int r = rowForTrackId (patch, id); r >= 0) rows.push_back (r);
+        if (! rows.empty()) applyPatch ([rows] (PatchState& p) { return deleteTracks (p, rows, false); });
+    }
+    engine.log().post (Level::info, "Undo: " + step.label);
+    if (bar.takeCombo.getSelectedId() != step.take) refreshTakes (false);
+    clipsChanged (step.take);
+    menuItemsChanged();
+}
+
+void MainComponent::clipsChanged (int take)
+{
+    if (session.primaryRoot == juce::File()) return;
+    takeLengths[take] = takeLength (resolveTakeClips (session.primaryRoot, take, patch));
+    if (bar.takeCombo.getSelectedId() == take) refreshTimeline (false);
+}
+
+void MainComponent::moveClipTo (int fromRow, int toRow, uint64_t offset)
+{
+    if (engine.isRecording() || session.primaryRoot == juce::File()) return;
+    const int take = bar.takeCombo.getSelectedId();
+    if (take <= 0 || fromRow < 0 || toRow < 0 || fromRow >= (int) patch.tracks.size() || toRow >= (int) patch.tracks.size()) return;
+    stopPlaybackForEdit();
+    writeManifestIfMissing (session.primaryRoot, take, patch);
+    const int fromId = patch.tracks[(size_t) fromRow].id, toId = patch.tracks[(size_t) toRow].id;
+    const auto clips = resolveTakeClips (session.primaryRoot, take, patch);
+
+    auto apply = [this, take, fromId, toId, offset, fromRow, toRow] (bool swap)
+    {
+        pushUndo (take, "Move Clip");
+        if (! moveClip (session.primaryRoot, take, fromId, toId, offset, swap)) { undoStack.pop_back(); return; }
+        engine.log().post (Level::info, "Clip moved" + (toRow != fromRow ? " from track " + juce::String (fromRow + 1) + " to track " + juce::String (toRow + 1) : juce::String())
+                                            + " at " + juce::String ((double) offset / juce::jmax (1.0, engine.sampleRate()), 2) + " s"
+                                            + (swap ? " (swapped)" : ""));
+        clipsChanged (take);
+    };
+
+    if (toRow != fromRow && clips.count (toRow) > 0)
+    {
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                          .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                          .withTitle ("Track " + juce::String (toRow + 1) + " already has audio")
+                                          .withMessage ("\"" + patch.tracks[(size_t) toRow].name + "\" already has audio in this take.\n\n"
+                                                        "Replace: the moved clip takes its place (its old file stays in the session folder).\n"
+                                                        "Swap: the two clips trade tracks.")
+                                          .withButton ("Replace")
+                                          .withButton ("Swap")
+                                          .withButton ("Cancel")
+                                          .withAssociatedComponent (this),
+                                      [apply, this] (int result)
+                                      {
+                                          if (result == 1) apply (false);
+                                          else if (result == 2) apply (true);
+                                          else refreshTimeline (false);
+                                      });
+        return;
+    }
+    apply (false);
+}
+
+void MainComponent::showClipMenu (int row, uint64_t frame)
+{
+    juce::ignoreUnused (frame);
+    const int take = bar.takeCombo.getSelectedId();
+    if (take <= 0 || row < 0 || row >= (int) patch.tracks.size() || session.primaryRoot == juce::File()) return;
+    const auto clips = resolveTakeClips (session.primaryRoot, take, patch);
+    const auto it = clips.find (row);
+    if (it == clips.end()) return;
+    const bool rec = engine.isRecording();
+    const int id = patch.tracks[(size_t) row].id;
+    const auto file = it->second.file;
+    const auto offset = it->second.offset;
+
+    juce::PopupMenu m;
+    m.addSectionHeader (file.getFileName());
+    m.addItem ("Move to Start of Take", ! rec && offset > 0, false, [this, row] { moveClipTo (row, row, 0); });
+    m.addItem ("Move to Playhead", ! rec, false, [this, row] { moveClipTo (row, row, cueFrames); });
+    m.addSeparator();
+    m.addItem ("Remove from Track", ! rec, false, [this, take, id, row]
+    {
+        stopPlaybackForEdit();
+        writeManifestIfMissing (session.primaryRoot, take, patch);
+        pushUndo (take, "Remove Clip");
+        removeClip (session.primaryRoot, take, id);
+        engine.log().post (Level::info, "Clip removed from track " + juce::String (row + 1) + " (the file stays in the session's Audio folder; Cmd+Z undoes)");
+        clipsChanged (take);
+    });
+    m.addItem ("Show File in Finder", true, false, [file] { file.revealToUser(); });
+    if (! undoStack.empty())
+    {
+        m.addSeparator();
+        m.addItem ("Undo " + undoStack.back().label, ! rec, false, [this] { undo(); });
+    }
+    m.showMenuAsync (juce::PopupMenu::Options().withMousePosition());
 }

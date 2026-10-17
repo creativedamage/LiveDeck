@@ -238,6 +238,13 @@ juce::Result RecordEngine::startPlayback (const juce::File& root, int playTake, 
 
 juce::Result RecordEngine::startPlayback (const std::map<int, juce::File>& files, int playTake, uint64_t fromFrame)
 {
+    std::map<int, Clip> clips;
+    for (const auto& [row, f] : files) clips[row] = { f, 0, f.getFileNameWithoutExtension() };
+    return startPlayback (clips, playTake, fromFrame);
+}
+
+juce::Result RecordEngine::startPlayback (const std::map<int, Clip>& files, int playTake, uint64_t fromFrame)
+{
     if (isRecording()) return juce::Result::fail ("Stop recording before playback");
     stopPlayback();
     auto p = std::make_unique<Player> (events);

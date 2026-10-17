@@ -5,6 +5,12 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+- **Drop audio onto a track**: drop a file on a track to put it on that track (its audio in the take on screen is replaced; the old file stays in the session folder). Several files fill that track and the ones below; files dropped below the last track still become new tracks.
+- **Move clips**: drag a clip by its name bar (or Alt-drag anywhere on it) to move it in time or onto another track. It snaps to 0:00, its old position, other clips and markers. If the other track already has audio you choose Replace or Swap.
+- **Right-click a clip**: Move to Start of Take, Move to Playhead, Remove from Track, Show File in Finder.
+- **Undo** (Edit > Undo, Cmd+Z) for imports and clip moves.
+- Moving a clip never rewrites audio: each take's manifest stores where every file starts.
+
 ## 0.5.0 - 2026-10-16
 
 - **Drag and drop audio onto the timeline**: WAV, BWF and AIFF files (or a whole folder) become new tracks in the take on screen, starting where you drop them (near the left edge snaps to 0:00). Stereo files make stereo tracks; multichannel files are split into one track per channel. Files are converted to the session's format and sample rate; the originals are never touched.

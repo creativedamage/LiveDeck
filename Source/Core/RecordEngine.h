@@ -51,6 +51,7 @@ public:
     // through that track's direct outs and the monitor bus instead of its live input.
     juce::Result startPlayback (const juce::File& sessionRoot, int take, uint64_t fromFrame);           // files by position
     juce::Result startPlayback (const std::map<int, juce::File>& filesByRow, int take, uint64_t fromFrame); // files by current row
+    juce::Result startPlayback (const std::map<int, Clip>& clipsByRow, int take, uint64_t fromFrame);       // clips (with offsets) by row
     void stopPlayback();
     bool isPlaying() const noexcept { return rtPlayer.load (std::memory_order_acquire) != nullptr; }
     bool playbackFinished() const noexcept { auto* p = player.get(); return p != nullptr && isPlaying() && p->finished(); }

@@ -34,9 +34,9 @@ Player::Player (EventLog& l) : juce::Thread ("omr-playback"), log (l)
 
 Player::~Player() { halt(); }
 
-std::map<int, juce::File> resolveTakeFiles (const juce::File& root, int take, const PatchState& patch)
+std::map<int, Clip> resolveTakeClips (const juce::File& root, int take, const PatchState& patch)
 {
-    std::map<int, juce::File> out;
+    std::map<int, Clip> out;
     const auto manifest = SessionPaths::takeManifest (root, take);
     if (manifest.existsAsFile())
     {
@@ -47,7 +47,10 @@ std::map<int, juce::File> resolveTakeFiles (const juce::File& root, int take, co
             {
                 const int row = rowForTrackId (patch, (int) e.getProperty ("id", 0));
                 const auto f = SessionPaths::audioDir (root).getChildFile (e.getProperty ("file", {}).toString());
-                if (row >= 0 && f.existsAsFile()) out[row] = f;
+                const auto off = (juce::int64) e.getProperty ("offset", 0);
+                const auto source = e.getProperty ("source", {}).toString();
+                if (row >= 0 && f.existsAsFile())
+                    out[row] = { f, (uint64_t) juce::jmax<juce::int64> (0, off), source.isNotEmpty() ? source : f.getFileNameWithoutExtension() };
             }
             return out;
         }
@@ -55,7 +58,14 @@ std::map<int, juce::File> resolveTakeFiles (const juce::File& root, int take, co
     const auto takes = scanTakes (root);
     if (auto it = takes.find (take); it != takes.end())
         for (const auto& [index, file] : it->second)
-            if (index < (int) patch.tracks.size()) out[index] = file;
+            if (index < (int) patch.tracks.size()) out[index] = { file, 0, file.getFileNameWithoutExtension() };
+    return out;
+}
+
+std::map<int, juce::File> resolveTakeFiles (const juce::File& root, int take, const PatchState& patch)
+{
+    std::map<int, juce::File> out;
+    for (const auto& [row, c] : resolveTakeClips (root, take, patch)) out[row] = c.file;
     return out;
 }
 
@@ -85,29 +95,120 @@ bool writeManifestIfMissing (const juce::File& root, int take, const PatchState&
     return manifest.replaceWithText (juce::JSON::toString (juce::var (m.get())), false, false, "\n");
 }
 
-bool appendToManifest (const juce::File& root, int take, const std::vector<ManifestEntry>& add)
+static juce::Array<juce::var> manifestEntries (const juce::File& root, int take)
 {
     const auto manifest = SessionPaths::takeManifest (root, take);
-    juce::Array<juce::var> entries;
     if (manifest.existsAsFile())
-        if (auto* existing = juce::JSON::parse (manifest).getProperty ("tracks", {}).getArray())
-            entries = *existing;
-    for (const auto& a : add)
     {
-        juce::DynamicObject::Ptr e = new juce::DynamicObject();
-        e->setProperty ("id", a.id);
-        e->setProperty ("row", a.row);
-        e->setProperty ("name", a.name);
-        e->setProperty ("channels", a.channels);
-        e->setProperty ("file", a.file.getFileName());
-        e->setProperty ("imported", true);
-        entries.add (juce::var (e.get()));
+        const auto parsed = juce::JSON::parse (manifest);    // keep it alive while copying the array
+        const auto tracks = parsed.getProperty ("tracks", {});
+        if (auto* existing = tracks.getArray()) return *existing;
     }
+    return {};
+}
+
+static bool writeManifestEntries (const juce::File& root, int take, const juce::Array<juce::var>& entries)
+{
     juce::DynamicObject::Ptr m = new juce::DynamicObject();
     m->setProperty ("take", take);
     m->setProperty ("tracks", entries);
     SessionPaths::audioDir (root).createDirectory();
-    return manifest.replaceWithText (juce::JSON::toString (juce::var (m.get())), false, false, "\n");
+    return SessionPaths::takeManifest (root, take).replaceWithText (juce::JSON::toString (juce::var (m.get())), false, false, "\n");
+}
+
+static juce::var entryVar (const ManifestEntry& a)
+{
+    juce::DynamicObject::Ptr e = new juce::DynamicObject();
+    e->setProperty ("id", a.id);
+    e->setProperty ("row", a.row);
+    e->setProperty ("name", a.name);
+    e->setProperty ("channels", a.channels);
+    e->setProperty ("file", a.file.getFileName());
+    if (a.offset > 0) e->setProperty ("offset", (juce::int64) a.offset);
+    if (a.source.isNotEmpty()) e->setProperty ("source", a.source);
+    e->setProperty ("imported", true);
+    return juce::var (e.get());
+}
+
+static int indexOfId (const juce::Array<juce::var>& entries, int id)
+{
+    for (int i = 0; i < entries.size(); ++i)
+        if ((int) entries[i].getProperty ("id", 0) == id) return i;
+    return -1;
+}
+
+bool appendToManifest (const juce::File& root, int take, const std::vector<ManifestEntry>& add)
+{
+    auto entries = manifestEntries (root, take);
+    for (const auto& a : add) entries.add (entryVar (a));
+    return writeManifestEntries (root, take, entries);
+}
+
+juce::String readManifestText (const juce::File& root, int take)
+{
+    const auto f = SessionPaths::takeManifest (root, take);
+    return f.existsAsFile() ? f.loadFileAsString() : juce::String();
+}
+
+bool restoreManifestText (const juce::File& root, int take, const juce::String& text)
+{
+    const auto f = SessionPaths::takeManifest (root, take);
+    if (text.isEmpty()) return ! f.exists() || f.deleteFile();
+    return f.replaceWithText (text, false, false, "\n");
+}
+
+bool setClip (const juce::File& root, int take, const ManifestEntry& e)
+{
+    auto entries = manifestEntries (root, take);
+    if (const int i = indexOfId (entries, e.id); i >= 0) entries.remove (i);
+    entries.add (entryVar (e));
+    return writeManifestEntries (root, take, entries);
+}
+
+bool moveClip (const juce::File& root, int take, int fromId, int toId, uint64_t newOffset, bool swap)
+{
+    auto entries = manifestEntries (root, take);
+    const int from = indexOfId (entries, fromId);
+    if (from < 0) return false;
+    auto set = [] (const juce::var& v, int id, uint64_t off)
+    {
+        if (auto* o = v.getDynamicObject())
+        {
+            o->setProperty ("id", id);
+            if (off > 0) o->setProperty ("offset", (juce::int64) off); else o->removeProperty ("offset");
+        }
+    };
+    const juce::var moving = entries[from];   // shares the object: edits below change the array entry
+    if (fromId != toId)
+    {
+        if (const int to = indexOfId (entries, toId); to >= 0)
+        {
+            if (swap) set (entries[to], fromId, (uint64_t) juce::jmax<juce::int64> (0, (juce::int64) entries[to].getProperty ("offset", 0)));
+            else entries.remove (to);
+        }
+    }
+    set (moving, toId, newOffset);
+    return writeManifestEntries (root, take, entries);
+}
+
+bool removeClip (const juce::File& root, int take, int trackId)
+{
+    auto entries = manifestEntries (root, take);
+    const int i = indexOfId (entries, trackId);
+    if (i < 0) return false;
+    entries.remove (i);
+    return writeManifestEntries (root, take, entries);
+}
+
+uint64_t takeLength (const std::map<int, Clip>& clips)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    uint64_t len = 0;
+    for (const auto& [index, c] : clips)
+        if (std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (c.file)); r != nullptr)
+            len = std::max (len, c.offset + (uint64_t) r->lengthInSamples);
+    return len;
 }
 
 uint64_t takeLength (const std::map<int, juce::File>& files)
@@ -131,6 +232,13 @@ juce::Result Player::load (const juce::File& root, int take, double sr, uint64_t
 
 juce::Result Player::load (const std::map<int, juce::File>& filesByRow, int take, double sr, uint64_t startFrame)
 {
+    std::map<int, Clip> clips;
+    for (const auto& [row, f] : filesByRow) clips[row] = { f, 0, f.getFileNameWithoutExtension() };
+    return load (clips, take, sr, startFrame);
+}
+
+juce::Result Player::load (const std::map<int, Clip>& clipsByRow, int take, double sr, uint64_t startFrame)
+{
     halt();
     for (auto& t : tracks) t.reset();
     list.clear();
@@ -139,10 +247,11 @@ juce::Result Player::load (const std::map<int, juce::File>& filesByRow, int take
     underruns = 0;
     underrunLogged = false;
 
-    if (filesByRow.empty()) return juce::Result::fail ("Take " + juce::String (take) + " has no audio for the current tracks");
+    if (clipsByRow.empty()) return juce::Result::fail ("Take " + juce::String (take) + " has no audio for the current tracks");
 
-    for (const auto& [trackIndex, file] : filesByRow)
+    for (const auto& [trackIndex, clip] : clipsByRow)
     {
+        const auto& file = clip.file;
         if (trackIndex < 0 || trackIndex >= kMaxTracks) continue;
         auto t = std::make_unique<TrackIn>();
         t->track = trackIndex;
@@ -152,7 +261,8 @@ juce::Result Player::load (const std::map<int, juce::File>& filesByRow, int take
             return juce::Result::fail (file.getFileName() + " is " + juce::String (t->reader->sampleRate / 1000.0, 1)
                                        + " kHz but the device runs at " + juce::String (sr / 1000.0, 1) + " kHz. Change the device rate to play this take.");
         t->channels = t->reader->numChannels >= 2 ? 2 : 1;
-        t->length = (uint64_t) t->reader->lengthInSamples;
+        t->offset = clip.offset;
+        t->length = clip.offset + (uint64_t) t->reader->lengthInSamples;
         t->readPos = std::min (startFrame, t->length);
         t->ring = std::make_unique<SpscRing<float>> ((size_t) (sr * kRingSeconds) * (size_t) t->channels);
         t->chunk.setSize (2, kChunk);
@@ -182,14 +292,24 @@ bool Player::fillOnce (TrackIn& t)
     if (t.readPos < t.length) n = (int) std::min<uint64_t> ((uint64_t) kChunk, t.length - t.readPos);
     else return false; // end of file: the audio side pads with silence
 
+    if (t.readPos < t.offset)
+    {
+        // Before the clip starts: silence (a dropped or moved file that starts later in the take).
+        n = (int) std::min<uint64_t> ((uint64_t) n, t.offset - t.readPos);
+        std::fill (t.interleaved.begin(), t.interleaved.begin() + (std::ptrdiff_t) n * t.channels, 0.0f);
+        t.ring->write (t.interleaved.data(), (size_t) n * (size_t) t.channels);
+        t.readPos += (uint64_t) n;
+        return true;
+    }
+    const auto filePos = (juce::int64) (t.readPos - t.offset);
     if (t.channels == 1)
     {
-        t.reader->read (&t.chunk, 0, n, (juce::int64) t.readPos, true, false);
+        t.reader->read (&t.chunk, 0, n, filePos, true, false);
         t.ring->write (t.chunk.getReadPointer (0), (size_t) n);
     }
     else
     {
-        t.reader->read (&t.chunk, 0, n, (juce::int64) t.readPos, true, true);
+        t.reader->read (&t.chunk, 0, n, filePos, true, true);
         const float* l = t.chunk.getReadPointer (0);
         const float* r = t.chunk.getReadPointer (1);
         for (int i = 0; i < n; ++i) { t.interleaved[(size_t) (2 * i)] = l[i]; t.interleaved[(size_t) (2 * i + 1)] = r[i]; }
