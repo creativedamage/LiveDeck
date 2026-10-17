@@ -5,6 +5,8 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-16
+
 - **Drop audio onto a track**: drop a file on a track to put it on that track (its audio in the take on screen is replaced; the old file stays in the session folder). Several files fill that track and the ones below; files dropped below the last track still become new tracks.
 - **Move clips**: drag a clip by its name bar (or Alt-drag anywhere on it) to move it in time or onto another track. It snaps to 0:00, its old position, other clips and markers. If the other track already has audio you choose Replace or Swap.
 - **Right-click a clip**: Move to Start of Take, Move to Playhead, Remove from Track, Show File in Finder.
