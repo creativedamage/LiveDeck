@@ -191,6 +191,30 @@ bool moveClip (const juce::File& root, int take, int fromId, int toId, uint64_t 
     return writeManifestEntries (root, take, entries);
 }
 
+bool removeClips (const juce::File& root, int take, const std::vector<int>& ids)
+{
+    auto entries = manifestEntries (root, take);
+    bool changed = false;
+    for (int id : ids)
+        if (const int i = indexOfId (entries, id); i >= 0) { entries.remove (i); changed = true; }
+    return changed && writeManifestEntries (root, take, entries);
+}
+
+bool shiftClips (const juce::File& root, int take, const std::vector<int>& ids, juce::int64 delta)
+{
+    auto entries = manifestEntries (root, take);
+    bool changed = false;
+    for (int id : ids)
+        if (const int i = indexOfId (entries, id); i >= 0)
+            if (auto* o = entries[i].getDynamicObject())
+            {
+                const auto off = juce::jmax<juce::int64> (0, (juce::int64) o->getProperty ("offset") + delta);
+                if (off > 0) o->setProperty ("offset", off); else o->removeProperty ("offset");
+                changed = true;
+            }
+    return changed && writeManifestEntries (root, take, entries);
+}
+
 bool removeClip (const juce::File& root, int take, int trackId)
 {
     auto entries = manifestEntries (root, take);

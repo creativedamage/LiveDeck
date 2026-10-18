@@ -137,6 +137,15 @@ private:
     void importAudioFiles (const juce::StringArray& paths, uint64_t startFrame, int targetRow = -1);
     // clip editing in the shown take (manifest only; files are never touched) + undo
     void moveClipTo (int fromRow, int toRow, uint64_t offset);
+    // clip (audio file) selection in the shown take, kept by track id
+    std::set<int> selectedClipIds;
+    void selectClip (int row, juce::ModifierKeys mods);
+    void selectAllClips();
+    void clearClipSelection();
+    std::vector<int> selectedClipRows() const;
+    void pushClipSelection();
+    void removeSelectedClips();
+    void shiftSelectedClips (juce::int64 deltaFrames, const juce::String& label);
     void showClipMenu (int row, uint64_t frame);
     void clipsChanged (int take);   // take length + timeline after a clip edit
     struct UndoStep { juce::File root; int take = 0; juce::String manifestBefore, label; std::vector<int> createdTrackIds; };
@@ -156,6 +165,8 @@ private:
     void showRegistration();
     void signOutOfAccount();
     void changePassword();
+    void warnDeadOutputs();
+    juce::String lastDeadOutputs;
     std::unique_ptr<AccountService> account;
     std::unique_ptr<LicenseGate> gate;
     bool licensed = false;

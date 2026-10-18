@@ -5,6 +5,10 @@ The section becomes the release notes that LiveDeck shows in its update window.
 
 ## Unreleased
 
+- **Select clips**: Cmd+A selects every clip (audio file) in the take on screen; click a clip to select it, Shift or Cmd-click to add more, Esc to clear. Delete removes the selected clips from their tracks (the files stay in the session folder), dragging one selected clip moves them all together, and right-click offers Move to Start / Move to Playhead for the whole selection. All undoable with Cmd+Z. Shift+Cmd+A now selects all tracks.
+- **Routing checks**: tracks whose input or output is turned off in Audio Setup (or doesn't exist on the device) now show their channel in orange "(off)", and the event log names them. The device line shows how many channels are on (e.g. "64 in [1 on]").
+- **View > Turn On All Inputs and Outputs** switches every channel of the audio device on in one click.
+
 ## 0.7.0 - 2026-10-17
 
 - **LiveDeck accounts and licenses**: sign in with email and password (with email confirmation, Forgot Password and Change Password) or with Google or Microsoft, register your organization, and buy an annual ($50/year) or perpetual ($129) license through Stripe. Verified non-profits get 10% off and no sales tax.

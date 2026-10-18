@@ -92,12 +92,14 @@ void ChannelStrip::showTrack (const omr::TrackState& t, bool mirror, bool record
     // A patch to a channel that is unticked / missing right now stays as it is, shown as "(off)".
     auto show = [] (juce::ComboBox& c, int id, int ch, bool stereo)
     {
+        c.setColour (juce::ComboBox::textColourId, Theme::text);
         if (c.indexOfItemId (id) >= 0) { c.setSelectedId (id, juce::dontSendNotification); return; }
+        c.setColour (juce::ComboBox::textColourId, Theme::orange);   // patched to a channel that is off: make it obvious
         c.setText ((stereo ? juce::String (ch + 1) + "-" + juce::String (ch + 2) + " ST" : juce::String (ch + 1)) + " (off)", juce::dontSendNotification);
     };
-    if (t.input < 0) input.setSelectedId (1, juce::dontSendNotification);
+    if (t.input < 0) { input.setColour (juce::ComboBox::textColourId, Theme::text); input.setSelectedId (1, juce::dontSendNotification); }
     else show (input, t.stereo ? kStereoId + t.input : t.input + 2, t.input, t.stereo);
-    if (t.outputs.empty()) output.setSelectedId (1, juce::dontSendNotification);
+    if (t.outputs.empty()) { output.setColour (juce::ComboBox::textColourId, Theme::text); output.setSelectedId (1, juce::dontSendNotification); }
     else show (output, t.outStereo ? kStereoId + t.outputs.front() : t.outputs.front() + 2, t.outputs.front(), t.outStereo);
     if (stereoState != t.stereo) { stereoState = t.stereo; repaint(); }
     if (! trim.isMouseButtonDown()) trim.setValue (t.trimDb, juce::dontSendNotification);

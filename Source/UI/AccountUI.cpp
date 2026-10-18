@@ -814,9 +814,9 @@ void LicenseGate::resized()
         if (id.startsWith ("rowbtn-"))
         {
             if (rowX < 0) rowX = r.getX() - 8;
-            const int w = juce::roundToInt (juce::GlyphArrangement::getStringWidth (Theme::ui (13.0f, true), dynamic_cast<juce::Button*> (c)->getButtonText())) + 18;
-            c->setBounds (rowX, y, w, 28);
-            rowX += w + 4;
+            const int bw = juce::roundToInt (juce::GlyphArrangement::getStringWidth (Theme::ui (13.0f, true), dynamic_cast<juce::Button*> (c)->getButtonText())) + 18;
+            c->setBounds (rowX, y, bw, 28);
+            rowX += bw + 4;
             continue;
         }
         endRow();

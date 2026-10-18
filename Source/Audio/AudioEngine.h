@@ -42,7 +42,8 @@ public:
     juce::var extraDevicesState() const;                 // for saving: names + remembered channel counts
     bool isExtraOnline (int extraIndex) const;
 
-    juce::String describeDevice() const;   // "Dante Virtual Soundcard  48.0 kHz  256 smp (64 in / 64 out) + 1 more"
+    juce::String describeDevice() const;
+    bool enableAllChannels();   // ticks every input and output of the primary device   // "Dante Virtual Soundcard  48.0 kHz  256 smp (64 in / 64 out) + 1 more"
     double cpuLoad() const { return deviceManager.getCpuUsage(); }
     int driverXruns() const;
     int bufferSize() const;

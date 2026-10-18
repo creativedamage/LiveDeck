@@ -1063,6 +1063,34 @@ static void testLibrary()
     Library::setRootForTesting ({});
 }
 
+static void testDeadOutputs()
+{
+    SECTION ("Routing: tracks patched to outputs that are unticked or missing are reported");
+    PatchState p;
+    juce::StringArray ins, outs;
+    for (int i = 0; i < 8; ++i) ins.add ("In " + juce::String (i + 1));
+    for (int i = 0; i < 2; ++i) outs.add ("Out " + juce::String (i + 1));
+    setupTracks (p, ins, outs);                      // mirror: tracks 3-8 point at outputs 3-8, which don't exist
+    auto dead = tracksWithDeadOutputs (p);
+    CHECK (dead.size() == 6 && dead.front() == 2 && dead.back() == 7);
+    // 8 outputs, but only 1-2 ticked in Audio Setup
+    juce::StringArray outs8;
+    for (int i = 0; i < 8; ++i) outs8.add ("Out " + juce::String (i + 1));
+    std::vector<bool> active (8, false); active[0] = active[1] = true;
+    setDeviceChannels (p, ins, outs8, {}, active);
+    CHECK (tracksWithDeadOutputs (p).size() == 6);
+    CHECK (tracksWithDeadInputs (p).empty());
+    std::vector<bool> inOn (8, false); inOn[0] = true;   // only input 1 ticked
+    setDeviceChannels (p, ins, outs8, inOn, {});
+    CHECK (tracksWithDeadInputs (p).size() == 7 && tracksWithDeadInputs (p).front() == 1);
+    setDeviceChannels (p, ins, outs8);               // all ticked
+    CHECK (tracksWithDeadOutputs (p).empty() && tracksWithDeadInputs (p).empty());
+    // a stereo out pair whose right side is missing
+    p.tracks[0].outputs = { 7 };
+    p.tracks[0].outStereo = true;
+    CHECK (tracksWithDeadOutputs (p).size() == 1);
+}
+
 static void testClips()
 {
     SECTION ("Clips: offsets, move between tracks, swap/replace, remove, undo text, offset playback");
@@ -1112,6 +1140,20 @@ static void testClips()
     CHECK (restoreManifestText (root, 1, before));
     c = resolveTakeClips (root, 1, p);
     CHECK (c.size() == 2 && c[0].offset == 0 && c[0].file == a && c[1].file == b);
+
+    // several clips at once: shift (never before 0) and remove
+    {
+        const auto keep = readManifestText (root, 1);
+        CHECK (shiftClips (root, 1, { id0 }, 2000));
+        CHECK (shiftClips (root, 1, { id0, id1 }, -1500));
+        auto cs = resolveTakeClips (root, 1, p);
+        CHECK (cs[0].offset == 500 && cs[1].offset == 0);   // clamped at the take start
+        CHECK (removeClips (root, 1, { id0, id1 }));
+        CHECK (resolveTakeClips (root, 1, p).empty());
+        CHECK (! removeClips (root, 1, { id0 }));          // nothing left to remove
+        CHECK (restoreManifestText (root, 1, keep));
+    }
+
 
     // playback: a clip starting at 1000 plays silence first, then the file from its first sample
     std::map<int, Clip> clips { { 0, { a, 1000 } } };
@@ -1206,6 +1248,7 @@ int main (int argc, char** argv)
     testFailedTarget();
     testImport();
     testClips();
+    testDeadOutputs();
     testLicense();
     testFeedback();
     testLibrary();

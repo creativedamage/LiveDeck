@@ -82,7 +82,12 @@ void ensureTrackIds (PatchState&);   // gives every track a unique id > 0
 int rowForTrackId (const PatchState&, int id);
 juce::Result setArmed (PatchState&, int track, bool armed, bool recording);
 juce::Result renameTrack (PatchState&, int track, const juce::String& name);
-void applyMirror (PatchState&);   // outputs follow inputs; tracks are never created or removed
+void applyMirror (PatchState&);
+// Tracks whose direct out(s) can't play right now: patched to an output that is unticked in Audio Setup
+// or that this device doesn't have. Rows (0-based), for a warning in the event log.
+std::vector<int> tracksWithDeadOutputs (const PatchState&);
+// Tracks whose input is unticked in Audio Setup or missing (they meter and record silence).
+std::vector<int> tracksWithDeadInputs (const PatchState&);   // outputs follow inputs; tracks are never created or removed
 
 juce::var patchToVar (const PatchState&);
 PatchState patchFromVar (const juce::var&);

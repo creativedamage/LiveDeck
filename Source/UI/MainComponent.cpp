@@ -108,6 +108,9 @@ MainComponent::MainComponent()
     timeline.onFilesDropped = [this] (const juce::StringArray& files, uint64_t frame, int row) { importAudioFiles (files, frame, row); };
     timeline.onClipMoved = [this] (int fromRow, int toRow, uint64_t offset) { moveClipTo (fromRow, toRow, offset); };
     timeline.onClipMenu = [this] (int row, uint64_t frame) { showClipMenu (row, frame); };
+    timeline.onClipClicked = [this] (int row, juce::ModifierKeys mods) { selectClip (row, mods); };
+    timeline.onClipSelectionCleared = [this] { clearClipSelection(); };
+    timeline.onClipsShifted = [this] (std::vector<int>, juce::int64 delta) { shiftSelectedClips (delta, "Move Clips"); };
     timeline.canAcceptDrop = [this] { return ! engine.isRecording(); };
 
     stripDropMarker.setOpaque (true);
@@ -242,6 +245,7 @@ void MainComponent::applyPatch (const std::function<juce::Result (PatchState&)>&
         it = rowForTrackId (patch, *it) < 0 ? selectedIds.erase (it) : std::next (it);
     if (wasMirror && ! patch.mirror) engine.log().post (Level::info, "Mirror off: an output was patched by hand. Turn it back on to make outputs follow inputs again.");
     engine.setPatch (patch);
+    warnDeadOutputs();
     if (patch.tracks.size() != before) rebuildStrips();
     else refreshStrips();
     autosave();
@@ -261,6 +265,7 @@ void MainComponent::deviceChanged()
         session.bufferSize = dev->getCurrentBufferSizeSamples();
     }
     engine.setPatch (patch);
+    warnDeadOutputs();
     rebuildStrips();
     refreshMonitorCombos();
     saveDeviceState();
@@ -477,6 +482,7 @@ void MainComponent::refreshTimeline (bool fit)
     timeline.setMarkers (loadMarkers (take));
     timeline.setTitle (take > 0 ? "Take " + juce::String (take) : juce::String ("No takes yet"));
     if (fit) timeline.zoomToFit();
+    pushClipSelection();
 }
 
 std::vector<TimelineView::Marker> MainComponent::loadMarkers (int take) const
@@ -557,6 +563,18 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
         case 1: // Edit
             m.addItem (menuItem (undoStack.empty() ? juce::String ("Undo") : "Undo " + undoStack.back().label, cmd + "Z",
                                  ! rec && ! undoStack.empty(), false, [this] { undo(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Select All Clips", cmd + "A", ! rec && bar.takeCombo.getSelectedId() > 0, false, [this] { selectAllClips(); }));
+            m.addItem (menuItem ("Deselect Clips", "Esc", ! selectedClipIds.empty(), false, [this] { clearClipSelection(); }));
+            m.addSeparator();
+            m.addItem (menuItem ("Move Selected Clips to Start", "", ! rec && ! selectedClipIds.empty(), false, [this]
+            {
+                juce::int64 earliest = std::numeric_limits<juce::int64>::max();
+                for (const auto& [row, c] : resolveTakeClips (session.primaryRoot, bar.takeCombo.getSelectedId(), patch))
+                    if (selectedClipIds.count (patch.tracks[(size_t) row].id)) earliest = juce::jmin (earliest, (juce::int64) c.offset);
+                if (earliest != std::numeric_limits<juce::int64>::max()) shiftSelectedClips (-earliest, "Move Clips to Start");
+            }));
+            m.addItem (menuItem ("Remove Selected Clips from Tracks", "Delete", ! rec && ! selectedClipIds.empty(), false, [this] { removeSelectedClips(); }));
             break;
 
         case 2: // Transport
@@ -574,7 +592,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Add Track", "", ! rec, false, [this] { applyPatch ([this] (PatchState& p) { return addTrack (p, engine.isRecording()); }); }));
             m.addItem (menuItem ("Add Multiple Tracks...", "", ! rec, false, [this] { showAddTracksDialog(); }));
             m.addSeparator();
-            m.addItem (menuItem ("Select All Tracks", cmd + "A", ! patch.tracks.empty(), false, [this] { for (const auto& t : patch.tracks) selectedIds.insert (t.id); refreshStrips(); }));
+            m.addItem (menuItem ("Select All Tracks", juce::String::charToString (0x21e7) + cmd + "A", ! patch.tracks.empty(), false, [this] { for (const auto& t : patch.tracks) selectedIds.insert (t.id); refreshStrips(); }));
             m.addItem (menuItem ("Delete Selected Tracks", "Delete", ! rec && ! selectedIds.empty(), false, [this] { deleteSelectedTracks(); }));
             m.addSeparator();
             m.addItem (menuItem ("Mirror Input to Output", "", true, patch.mirror, [this]
@@ -603,6 +621,11 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addItem (menuItem ("Zoom to Fit", cmd + "0", true, false, [this] { timeline.zoomToFit(); }));
             m.addSeparator();
             m.addItem (menuItem ("Audio Setup...", cmd + ",", true, false, [this] { showAudioSetup(); }));
+            m.addItem (menuItem ("Turn On All Inputs and Outputs", "", ! rec, false, [this]
+            {
+                if (audio.enableAllChannels()) engine.log().post (Level::info, "All inputs and outputs turned on: " + audio.describeDevice());
+                else alert ("Turn on all channels", "Couldn't change the device's channels. Open Audio Setup to check the device.", true);
+            }));
             m.addItem (menuItem ("Additional Audio Devices...", "", ! rec, false, [this] { showExtraDevices(); }));
             break;
 
@@ -679,12 +702,18 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
         }
     }
     if (! mods.isAnyModifierKeyDown() && (k.getTextCharacter() == 'm' || k.getTextCharacter() == 'M')) { addMarker(); return true; }
+    if ((k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) && ! selectedClipIds.empty()) { removeSelectedClips(); return true; }
     if ((k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) && ! selectedIds.empty()) { deleteSelectedTracks(); return true; }
+    if (k == juce::KeyPress::escapeKey && ! selectedClipIds.empty()) { clearClipSelection(); return true; }
     if (k == juce::KeyPress::escapeKey && ! selectedIds.empty()) { selectedIds.clear(); refreshStrips(); return true; }
-    if (mods.isCommandDown() && (k.getTextCharacter() == 'a' || k.getKeyCode() == 'A'))
+    if (mods.isCommandDown() && (k.getKeyCode() == 'A' || k.getKeyCode() == 'a' || k.getTextCharacter() == 'a' || k.getTextCharacter() == 'A'))
     {
-        for (const auto& t : patch.tracks) selectedIds.insert (t.id);
-        refreshStrips();
+        if (mods.isShiftDown())   // Shift+Cmd+A: all tracks
+        {
+            for (const auto& t : patch.tracks) selectedIds.insert (t.id);
+            refreshStrips();
+        }
+        else selectAllClips();    // Cmd+A: all clips (audio files) in the take on screen
         return true;
     }
 
@@ -1991,6 +2020,22 @@ void MainComponent::showClipMenu (int row, uint64_t frame)
     const auto file = it->second.file;
     const auto offset = it->second.offset;
 
+    if (selectedClipIds.size() > 1 && selectedClipIds.count (id) > 0)
+    {
+        // Menu for the whole clip selection.
+        juce::int64 earliest = std::numeric_limits<juce::int64>::max();
+        for (const auto& [r, c] : clips) if (selectedClipIds.count (patch.tracks[(size_t) r].id)) earliest = juce::jmin (earliest, (juce::int64) c.offset);
+        juce::PopupMenu g;
+        g.addSectionHeader (juce::String ((int) selectedClipIds.size()) + " clips selected");
+        g.addItem ("Move to Start of Take (keep their spacing)", ! rec && earliest > 0, false, [this, earliest] { shiftSelectedClips (-earliest, "Move Clips to Start"); });
+        g.addItem ("Move to Playhead (keep their spacing)", ! rec, false, [this, earliest] { shiftSelectedClips ((juce::int64) cueFrames - earliest, "Move Clips to Playhead"); });
+        g.addSeparator();
+        g.addItem ("Remove " + juce::String ((int) selectedClipIds.size()) + " Clips from Their Tracks", ! rec, false, [this] { removeSelectedClips(); });
+        g.addItem ("Deselect", true, false, [this] { clearClipSelection(); });
+        g.showMenuAsync (juce::PopupMenu::Options().withMousePosition());
+        return;
+    }
+
     juce::PopupMenu m;
     m.addSectionHeader (file.getFileName());
     m.addItem ("Move to Start of Take", ! rec && offset > 0, false, [this, row] { moveClipTo (row, row, 0); });
@@ -2168,4 +2213,126 @@ void MainComponent::changePassword()
             alert ("Change password", ok ? juce::String ("Your password has been changed.") : err, ! ok);
         });
     }), false);
+}
+
+// ------------------------------------------------------------------------------------ clip selection
+
+std::vector<int> MainComponent::selectedClipRows() const
+{
+    std::vector<int> rows;
+    for (int id : selectedClipIds) if (const int r = rowForTrackId (patch, id); r >= 0) rows.push_back (r);
+    std::sort (rows.begin(), rows.end());
+    return rows;
+}
+
+void MainComponent::pushClipSelection()
+{
+    // keep only tracks that actually have a clip in the take on screen
+    const int take = bar.takeCombo.getSelectedId();
+    std::set<int> rowsWithClips;
+    if (take > 0 && session.primaryRoot != juce::File())
+        for (const auto& [row, c] : resolveTakeClips (session.primaryRoot, take, patch)) rowsWithClips.insert (row);
+    std::set<int> rows;
+    for (auto it = selectedClipIds.begin(); it != selectedClipIds.end();)
+    {
+        const int r = rowForTrackId (patch, *it);
+        if (r < 0 || rowsWithClips.count (r) == 0) it = selectedClipIds.erase (it);
+        else { rows.insert (r); ++it; }
+    }
+    timeline.setClipSelection (rows);
+    menuItemsChanged();
+}
+
+void MainComponent::selectClip (int row, juce::ModifierKeys mods)
+{
+    if (row < 0 || row >= (int) patch.tracks.size()) return;
+    const int id = patch.tracks[(size_t) row].id;
+    if (mods.isShiftDown() || mods.isCommandDown())
+    {
+        if (selectedClipIds.count (id)) selectedClipIds.erase (id);
+        else selectedClipIds.insert (id);
+    }
+    else selectedClipIds = { id };
+    pushClipSelection();
+    grabKeyboardFocus();
+}
+
+void MainComponent::selectAllClips()
+{
+    const int take = bar.takeCombo.getSelectedId();
+    if (engine.isRecording() || take <= 0 || session.primaryRoot == juce::File()) return;
+    selectedClipIds.clear();
+    for (const auto& [row, c] : resolveTakeClips (session.primaryRoot, take, patch)) selectedClipIds.insert (patch.tracks[(size_t) row].id);
+    pushClipSelection();
+    engine.log().post (Level::info, juce::String ((int) selectedClipIds.size()) + " clips selected (Delete removes them, drag one to move them all, Esc clears)");
+}
+
+void MainComponent::clearClipSelection()
+{
+    if (selectedClipIds.empty()) return;
+    selectedClipIds.clear();
+    pushClipSelection();
+}
+
+void MainComponent::removeSelectedClips()
+{
+    const int take = bar.takeCombo.getSelectedId();
+    if (engine.isRecording() || take <= 0 || selectedClipIds.empty()) return;
+    stopPlaybackForEdit();
+    writeManifestIfMissing (session.primaryRoot, take, patch);
+    const std::vector<int> ids (selectedClipIds.begin(), selectedClipIds.end());
+    pushUndo (take, ids.size() == 1 ? "Remove Clip" : "Remove Clips");
+    if (! removeClips (session.primaryRoot, take, ids)) { undoStack.pop_back(); return; }
+    engine.log().post (Level::info, juce::String ((int) ids.size()) + " clip(s) removed from their tracks. The files stay in the session's Audio folder; Cmd+Z brings them back.");
+    selectedClipIds.clear();
+    clipsChanged (take);
+    pushClipSelection();
+}
+
+void MainComponent::shiftSelectedClips (juce::int64 delta, const juce::String& label)
+{
+    const int take = bar.takeCombo.getSelectedId();
+    if (engine.isRecording() || take <= 0 || selectedClipIds.empty() || delta == 0) return;
+    stopPlaybackForEdit();
+    writeManifestIfMissing (session.primaryRoot, take, patch);
+    const std::vector<int> ids (selectedClipIds.begin(), selectedClipIds.end());
+    pushUndo (take, label);
+    if (! shiftClips (session.primaryRoot, take, ids, delta)) { undoStack.pop_back(); return; }
+    engine.log().post (Level::info, juce::String ((int) ids.size()) + " clip(s) moved " + (delta >= 0 ? "later" : "earlier") + " by "
+                                        + juce::String (std::abs ((double) delta) / juce::jmax (1.0, engine.sampleRate()), 2) + " s");
+    clipsChanged (take);
+    pushClipSelection();
+}
+
+void MainComponent::warnDeadOutputs()
+{
+    // Tracks whose input or output can't pass audio right now: unticked in Audio Setup, or a channel
+    // number the device doesn't have. They show "(off)" in the mixer; this says it in the event log too.
+    const auto outRows = tracksWithDeadOutputs (patch);
+    const auto inRows = tracksWithDeadInputs (patch);
+    juce::String key;
+    for (int r : inRows) key << "i" << r;
+    for (int r : outRows) key << "o" << r;
+    if (key == lastDeadOutputs) return;
+    lastDeadOutputs = key;
+    if (inRows.empty() && outRows.empty()) return;
+
+    auto list = [this] (const std::vector<int>& rows)
+    {
+        juce::StringArray names;
+        for (int r : rows) names.add (juce::String (r + 1) + " " + patch.tracks[(size_t) r].name);
+        return names.joinIntoString (", ", 0, 8) + (rows.size() > 8 ? ", ..." : "");
+    };
+    int activeIn = 0, activeOut = 0;
+    for (int c = 0; c < patch.numInputs; ++c) activeIn += isInputActive (patch, c) ? 1 : 0;
+    for (int c = 0; c < patch.numOutputs; ++c) activeOut += isOutputActive (patch, c) ? 1 : 0;
+    const auto fix = juce::String (" Use View > Turn On All Inputs and Outputs, or tick them in Audio Setup.");
+    if (! inRows.empty())
+        engine.log().post (Level::warning, juce::String ((int) inRows.size()) + " track(s) use inputs that are off (no audio, shown as \"(off)\"): "
+                                               + list (inRows) + ". " + juce::String (activeIn) + " of " + juce::String (patch.numInputs)
+                                               + " inputs are on." + fix);
+    if (! outRows.empty())
+        engine.log().post (Level::warning, juce::String ((int) outRows.size()) + " track(s) send to outputs that are off or don't exist (shown as \"(off)\"): "
+                                               + list (outRows) + ". " + juce::String (activeOut) + " of " + juce::String (patch.numOutputs)
+                                               + " outputs are on." + fix);
 }

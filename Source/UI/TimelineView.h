@@ -48,6 +48,12 @@ public:
     // Clip editing: drag a clip by its name bar (or Alt-drag anywhere on it) to move it in time or to another track.
     std::function<void (int fromRow, int toRow, uint64_t newOffset)> onClipMoved;
     std::function<void (int row, uint64_t frameAtClick)> onClipMenu;   // right-click on a clip
+    // Clip selection (Cmd+A = all clips). Click a clip to select it, Shift/Cmd-click to add or remove;
+    // a click on an empty part of a lane clears it. Dragging a selected clip moves all selected clips.
+    std::function<void (int row, juce::ModifierKeys mods)> onClipClicked;
+    std::function<void()> onClipSelectionCleared;
+    std::function<void (std::vector<int> rows, juce::int64 deltaFrames)> onClipsShifted;
+    void setClipSelection (const std::set<int>& rows);
     std::function<bool()> canAcceptDrop;                 // false while recording
     void setBusyText (const juce::String& text);         // "Importing 3 of 12..." overlay; empty hides it
 
@@ -78,6 +84,7 @@ private:
         std::shared_ptr<omr::PeakStore> peaks;
         uint64_t clipOffset = 0;
         juce::String clipName;
+        bool clipSelected = false;
     };
 
     void scrollBarMoved (juce::ScrollBar*, double) override;
@@ -132,7 +139,8 @@ private:
     juce::Rectangle<float> clipBounds (int row) const;     // the clip's rectangle in this row's lane
     bool hitClipHandle (juce::Point<int> p, int& row) const;
     bool hitClip (juce::Point<int> p, int& row) const;
-    struct ClipDrag { int fromRow = -1, toRow = -1, pressX = 0; uint64_t origOffset = 0, newOffset = 0; bool moved = false; } clipDrag;
+    struct ClipDrag { int fromRow = -1, toRow = -1, pressX = 0; uint64_t origOffset = 0, newOffset = 0; bool moved = false, group = false; } clipDrag;
+    juce::int64 groupDelta() const;   // group drag: frames to shift every selected clip (clamped at the take start)
     uint64_t snapOffset (uint64_t off, int ignoreRow) const;
     void paintClipGhost (juce::Graphics&);
     static constexpr int kClipBarH = 13;

@@ -88,9 +88,23 @@ void TimelineView::setPeaks (int track, std::shared_ptr<omr::PeakStore> store, u
     repaint();
 }
 
+void TimelineView::setClipSelection (const std::set<int>& selectedRows)
+{
+    for (int i = 0; i < (int) rows.size(); ++i) rows[(size_t) i].clipSelected = selectedRows.count (i) > 0 && rows[(size_t) i].peaks != nullptr;
+    repaint();
+}
+
+juce::int64 TimelineView::groupDelta() const
+{
+    juce::int64 delta = (juce::int64) clipDrag.newOffset - (juce::int64) clipDrag.origOffset;
+    for (const auto& r : rows)   // no selected clip may move before the start of the take
+        if (r.clipSelected && r.peaks != nullptr) delta = juce::jmax (delta, -(juce::int64) r.clipOffset);
+    return delta;
+}
+
 void TimelineView::clearPeaks()
 {
-    for (auto& r : rows) { r.peaks.reset(); r.clipOffset = 0; r.clipName = {}; }
+    for (auto& r : rows) { r.peaks.reset(); r.clipOffset = 0; r.clipName = {}; r.clipSelected = false; }
     repaint();
 }
 
@@ -376,18 +390,26 @@ void TimelineView::paintRow (juce::Graphics& g, int i, juce::Rectangle<int> r)
     if (x1 <= x0) return;
 
     const bool live = recording && recordingSession;
-    const bool beingMoved = clipDrag.moved && clipDrag.fromRow == i;
+    const bool beingMoved = clipDrag.moved && (clipDrag.fromRow == i || (clipDrag.group && row.clipSelected));
     auto clip = juce::Rectangle<float> (x0, (float) lane.getY() + 2.0f, x1 - x0, (float) lane.getHeight() - 5.0f);
     g.setColour (row.colour.withAlpha (row.mute ? 0.10f : 0.22f));
     g.fillRect (clip);
     g.setColour (live && row.armed ? Theme::red : row.colour.withAlpha (0.8f));
     g.fillRect (clip.withHeight (2.0f));
 
+    if (row.clipSelected)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.10f));
+        g.fillRect (clip);
+        g.setColour (juce::Colours::white);
+        g.drawRect (clip, 2.0f);
+    }
+
     // Name bar: drag it to move the clip (time and/or track).
     if (rowH >= 40 && ! live)
     {
         const auto bar = clip.withHeight ((float) kClipBarH);
-        g.setColour (row.colour.withAlpha (0.55f));
+        g.setColour (row.clipSelected ? row.colour.brighter (0.3f) : row.colour.withAlpha (0.55f));
         g.fillRect (bar);
         g.setColour (juce::Colours::black.withAlpha (0.85f));
         g.setFont (Theme::ui (10.0f, true));
@@ -523,6 +545,35 @@ void TimelineView::paint (juce::Graphics& g)
 void TimelineView::paintClipGhost (juce::Graphics& g)
 {
     if (clipDrag.fromRow < 0 || ! clipDrag.moved) return;
+    if (clipDrag.group)
+    {
+        const auto delta = groupDelta();
+        juce::Graphics::ScopedSaveState s (g);
+        const auto ra = rowsArea();
+        g.reduceClipRegion (ra.withTrimmedLeft (kHeaderW));
+        for (int i = 0; i < (int) rows.size(); ++i)
+        {
+            const auto& r = rows[(size_t) i];
+            if (! r.clipSelected || r.peaks == nullptr) continue;
+            const auto lane = rowBounds (i).withTrimmedLeft (kHeaderW);
+            const auto start = (double) ((juce::int64) r.clipOffset + delta);
+            const auto ghost = juce::Rectangle<float> (frameToX (start), (float) lane.getY() + 2.0f,
+                                                       frameToX (start + (double) r.peaks->frames()) - frameToX (start), (float) lane.getHeight() - 5.0f);
+            g.setColour (r.colour.withAlpha (0.35f));
+            g.fillRect (ghost);
+            g.setColour (juce::Colours::white);
+            g.drawRect (ghost, 1.5f);
+        }
+        const auto label = (delta >= 0 ? "+" : "-") + formatTime (std::abs ((double) delta) / sampleRate, 0.1);
+        g.setFont (Theme::ui (11.0f, true));
+        const auto x = frameToX ((double) ((juce::int64) clipDrag.origOffset + delta));
+        const auto tb = juce::Rectangle<float> (juce::jmax ((float) kHeaderW + 2.0f, x + 4.0f), (float) rowBounds (clipDrag.fromRow).getY() + 4.0f, 90.0f, 16.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.7f));
+        g.fillRoundedRectangle (tb, 3.0f);
+        g.setColour (juce::Colours::white);
+        g.drawText (label, tb.translated (5.0f, 0.0f), juce::Justification::centredLeft, false);
+        return;
+    }
     const auto& src = rows[(size_t) clipDrag.fromRow];
     if (src.peaks == nullptr) return;
     const auto ra = rowsArea();
@@ -755,12 +806,26 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
     }
     if (hitClipHandle (p, clipRow) || (e.mods.isAltDown() && hitClip (p, clipRow)))
     {
+        // Clicking an unselected clip selects it (Shift / Cmd add it); dragging a selected clip moves the selection.
+        const bool modsAdd = e.mods.isShiftDown() || e.mods.isCommandDown();
+        if (! rows[(size_t) clipRow].clipSelected || modsAdd)
+            if (onClipClicked) onClipClicked (clipRow, e.mods);
+        int selectedCount = 0;
+        for (const auto& r : rows) selectedCount += r.clipSelected ? 1 : 0;
         clipDrag = {};
         clipDrag.fromRow = clipDrag.toRow = clipRow;
         clipDrag.pressX = p.x;
         clipDrag.origOffset = clipDrag.newOffset = rows[(size_t) clipRow].clipOffset;
+        clipDrag.group = selectedCount > 1 && rows[(size_t) clipRow].clipSelected;
         return;
     }
+    // A click on a clip's waveform selects it (and still moves the playhead); on an empty lane it clears the selection.
+    if (hitClip (p, clipRow))
+    {
+        if (onClipClicked) onClipClicked (clipRow, e.mods);
+        if (e.mods.isShiftDown() || e.mods.isCommandDown()) return;
+    }
+    else if (p.x >= kHeaderW && p.y >= rowsArea().getY() && onClipSelectionCleared) onClipSelectionCleared();
 
     if (p.y < rowsArea().getBottom() && p.x < kHeaderW + laneWidth())
     {
@@ -790,6 +855,7 @@ void TimelineView::mouseDrag (const juce::MouseEvent& e)
         const int over = dropRowForY (juce::jlimit (ra.getY(), ra.getBottom() - 1, e.y));
         clipDrag.toRow = over >= 0 ? over : (e.y < ra.getY() ? (scrollY / rowH) : (int) rows.size() - 1);
         clipDrag.toRow = juce::jlimit (0, (int) rows.size() - 1, clipDrag.toRow);
+        if (clipDrag.group) clipDrag.toRow = clipDrag.fromRow;   // several clips move in time only
         if (std::abs (e.x - clipDrag.pressX) > 3 || clipDrag.toRow != clipDrag.fromRow) clipDrag.moved = true;
         setMouseCursor (juce::MouseCursor::DraggingHandCursor);
         repaint();
@@ -824,6 +890,16 @@ void TimelineView::mouseUp (const juce::MouseEvent&)
         clipDrag = {};
         setMouseCursor (juce::MouseCursor::NormalCursor);
         repaint();
+        if (d.moved && d.group)
+        {
+            clipDrag = d;
+            const auto delta = groupDelta();
+            clipDrag = {};
+            std::vector<int> sel;
+            for (int i = 0; i < (int) rows.size(); ++i) if (rows[(size_t) i].clipSelected) sel.push_back (i);
+            if (delta != 0 && onClipsShifted) onClipsShifted (sel, delta);
+            return;
+        }
         if (d.moved && (d.toRow != d.fromRow || d.newOffset != d.origOffset) && onClipMoved) onClipMoved (d.fromRow, d.toRow, d.newOffset);
         return;
     }

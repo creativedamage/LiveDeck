@@ -245,13 +245,30 @@ std::vector<bool> AudioEngine::outputActive() const
     return v;
 }
 
+bool AudioEngine::enableAllChannels()
+{
+    auto* d = deviceManager.getCurrentAudioDevice();
+    if (d == nullptr) return false;
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.useDefaultInputChannels = false;
+    setup.useDefaultOutputChannels = false;
+    setup.inputChannels.clear();
+    setup.outputChannels.clear();
+    setup.inputChannels.setRange (0, d->getInputChannelNames().size(), true);
+    setup.outputChannels.setRange (0, d->getOutputChannelNames().size(), true);
+    return deviceManager.setAudioDeviceSetup (setup, true).isEmpty();
+}
+
 juce::String AudioEngine::describeDevice() const
 {
     auto* d = deviceManager.getCurrentAudioDevice();
     if (d == nullptr) return "No audio device";
+    const int nIn = d->getInputChannelNames().size(), nOut = d->getOutputChannelNames().size();
+    const int onIn = d->getActiveInputChannels().countNumberOfSetBits(), onOut = d->getActiveOutputChannels().countNumberOfSetBits();
     juce::String s = d->getName() + "  " + juce::String (d->getCurrentSampleRate() / 1000.0, 1) + " kHz  "
                    + juce::String (d->getCurrentBufferSizeSamples()) + " smp  ("
-                   + juce::String (d->getInputChannelNames().size()) + " in / " + juce::String (d->getOutputChannelNames().size()) + " out)";
+                   + juce::String (nIn) + " in" + (onIn < nIn ? " [" + juce::String (onIn) + " on]" : juce::String()) + " / "
+                   + juce::String (nOut) + " out" + (onOut < nOut ? " [" + juce::String (onOut) + " on]" : juce::String()) + ")";
     if (! extras.empty())
     {
         int online = 0;

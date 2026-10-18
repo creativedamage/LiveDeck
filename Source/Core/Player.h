@@ -49,6 +49,9 @@ bool setClip (const juce::File& sessionRoot, int take, const ManifestEntry& e);
 // to fromId (keeping its own offset), otherwise it is unlinked from the take.
 bool moveClip (const juce::File& sessionRoot, int take, int fromId, int toId, uint64_t newOffset, bool swap);
 bool removeClip (const juce::File& sessionRoot, int take, int trackId);   // unlinks; the file stays on disk
+// Several clips at once: unlink them, or move them all by the same number of frames (never before 0).
+bool removeClips (const juce::File& sessionRoot, int take, const std::vector<int>& trackIds);
+bool shiftClips (const juce::File& sessionRoot, int take, const std::vector<int>& trackIds, juce::int64 deltaFrames);
 
 // Length of a take in frames: the end of its last clip.
 uint64_t takeLength (const std::map<int, juce::File>& files);

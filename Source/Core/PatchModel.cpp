@@ -23,6 +23,37 @@ void applyMirror (PatchState& s)
     }
 }
 
+std::vector<int> tracksWithDeadOutputs (const PatchState& s)
+{
+    std::vector<int> rows;
+    for (int i = 0; i < (int) s.tracks.size(); ++i)
+    {
+        const auto& t = s.tracks[(size_t) i];
+        bool dead = false;
+        for (int o : t.outputs)
+        {
+            if (! (o >= 0 && o < s.numOutputs && (s.outputActive.empty() || (o < (int) s.outputActive.size() && s.outputActive[(size_t) o])))) dead = true;
+            if (t.outStereo && ! (o + 1 < s.numOutputs && (s.outputActive.empty() || (o + 1 < (int) s.outputActive.size() && s.outputActive[(size_t) o + 1])))) dead = true;
+        }
+        if (dead) rows.push_back (i);
+    }
+    return rows;
+}
+
+std::vector<int> tracksWithDeadInputs (const PatchState& s)
+{
+    std::vector<int> rows;
+    for (int i = 0; i < (int) s.tracks.size(); ++i)
+    {
+        const auto& t = s.tracks[(size_t) i];
+        if (t.input < 0) continue;
+        bool ok = isInputActive (s, t.input);
+        if (t.stereo) ok = ok && isInputActive (s, t.input + 1);
+        if (! ok) rows.push_back (i);
+    }
+    return rows;
+}
+
 static bool locate (const std::vector<DeviceLayout>& devs, bool inputs, int global, int total, int& device, int& local)
 {
     if (global < 0 || global >= total) return false;
